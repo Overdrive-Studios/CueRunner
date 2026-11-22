@@ -1,12 +1,12 @@
-"""CueRunner main window: a cue list with audio playback, fades and hotkeys."""
+"""CueRunner main window: a dark cue list with playhead, GO/Stop, fades and hotkeys."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QUrl
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -16,22 +16,32 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QHBoxLayout,
     QHeaderView,
     QKeySequenceEdit,
+    QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QToolBar,
+    QVBoxLayout,
+    QWidget,
 )
 
 from cuerunner.fades import FADE_TICK_MS, fade_volumes
 from cuerunner.model import Cue, Show
+from cuerunner.theme import apply_dark_theme
+from cuerunner.timecode import format_clock, format_duration
 
-COLUMNS = ["No.", "Name", "Type", "Fade In / Out", "Hotkey", "File"]
+COLUMNS = ["Q", "Cue", "Type", "Duration", "Fade In", "Fade Out", "Hotkey", "File"]
 SHOW_FILTER = "CueRunner show (*.cuerunner.json);;All files (*)"
 AUDIO_FILTER = "Audio files (*.wav *.aiff *.aif *.mp3 *.m4a *.flac *.ogg);;All files (*)"
+
+PLAYING_COLOUR = QColor(30, 84, 48)
+PLAYHEAD_MARK = "▶"
 
 
 class CueDialog(QDialog):
@@ -79,10 +89,13 @@ class MainWindow(QMainWindow):
         self.show_model = Show()
         self.show_path: Path | None = None
         self._shortcuts: list[QShortcut] = []
+        self._probes: list[QMediaPlayer] = []
+        self._playing_cue: Cue | None = None
 
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
         self.player.setAudioOutput(self.audio_output)
+        self.player.playbackStateChanged.connect(self._on_playback_state)
 
         self._playing_fade_out = 0.0
         self._fade_queue: list[float] = []
@@ -91,57 +104,121 @@ class MainWindow(QMainWindow):
         self.fade_timer.setInterval(FADE_TICK_MS)
         self.fade_timer.timeout.connect(self._fade_tick)
 
+        self.clock_timer = QTimer(self)
+        self.clock_timer.setInterval(100)
+        self.clock_timer.timeout.connect(self._update_clock)
+
+        self._build_toolbar()
+        self._build_central()
+        QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=self.go)
+        self._refresh_title()
+        self.resize(1100, 620)
+
+    # --- UI setup -----------------------------------------------------
+
+    def _build_toolbar(self) -> None:
+        bar = QToolBar("File", self)
+        bar.setMovable(False)
+        self.addToolBar(bar)
+        for label, handler in [
+            ("New", self.new_show),
+            ("Open...", self.open_show),
+            ("Save", self.save_show),
+        ]:
+            bar.addAction(label, handler)
+        bar.addSeparator()
+        for label, handler in [
+            ("Add Audio Cue...", self.add_audio_cue),
+            ("Edit Cue...", self.edit_selected),
+            ("Remove Cue", self.remove_cue),
+        ]:
+            bar.addAction(label, handler)
+
+    def _build_central(self) -> None:
+        container = QWidget(self)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        transport = QHBoxLayout()
+        self.go_button = QPushButton("GO")
+        self.go_button.setObjectName("go")
+        self.go_button.clicked.connect(self.go)
+        self.stop_button = QPushButton("STOP")
+        self.stop_button.setObjectName("stop")
+        self.stop_button.clicked.connect(self.stop)
+        self.now_label = QLabel("Standby")
+        self.now_label.setObjectName("now")
+        self.clock_label = QLabel(format_clock(0))
+        self.clock_label.setObjectName("clock")
+        transport.addWidget(self.go_button)
+        transport.addWidget(self.stop_button)
+        transport.addSpacing(16)
+        transport.addWidget(self.now_label, 1)
+        transport.addWidget(self.clock_label)
+        layout.addLayout(transport)
+
         self.table = QTableWidget(0, len(COLUMNS), self)
         self.table.setHorizontalHeaderLabels(COLUMNS)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setShowGrid(False)
         self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnWidth(0, 60)
         self.table.itemDoubleClicked.connect(lambda item: self.edit_row(item.row()))
-        self.setCentralWidget(self.table)
+        self.table.itemSelectionChanged.connect(self._refresh_now_label)
+        layout.addWidget(self.table, 1)
 
-        self._build_toolbar()
-        self._refresh_title()
-        self.resize(1000, 520)
-
-    # --- UI setup -----------------------------------------------------
-
-    def _build_toolbar(self) -> None:
-        bar = QToolBar("Main", self)
-        bar.setMovable(False)
-        self.addToolBar(bar)
-
-        actions = [
-            ("New", self.new_show),
-            ("Open...", self.open_show),
-            ("Save", self.save_show),
-            (None, None),
-            ("Add Audio Cue...", self.add_audio_cue),
-            ("Edit Cue...", self.edit_selected),
-            ("Remove Cue", self.remove_cue),
-            (None, None),
-            ("GO", self.go),
-            ("Stop", self.stop),
-        ]
-        for label, handler in actions:
-            if label is None:
-                bar.addSeparator()
-            else:
-                bar.addAction(label, handler)
+        self.setCentralWidget(container)
 
     def _refresh_title(self) -> None:
         name = self.show_path.name if self.show_path else "Untitled"
         self.setWindowTitle(f"CueRunner - {name}")
 
     def _refresh_table(self) -> None:
-        self.table.setRowCount(len(self.show_model.cues))
-        for row, cue in enumerate(self.show_model.cues):
-            fades = f"{cue.fade_in:g} / {cue.fade_out:g} s"
-            values = [cue.number, cue.name, cue.kind, fades, cue.hotkey, cue.file]
+        cues = self.show_model.cues
+        playhead = self._playhead_row()
+        playing_row = next((i for i, c in enumerate(cues) if c is self._playing_cue), -1)
+
+        self.table.setRowCount(len(cues))
+        for row, cue in enumerate(cues):
+            marker = PLAYHEAD_MARK if row == playhead else ""
+            values = [
+                f"{marker} {cue.number}".strip(),
+                cue.name,
+                cue.kind,
+                format_duration(cue.duration_ms),
+                f"{cue.fade_in:g} s",
+                f"{cue.fade_out:g} s",
+                cue.hotkey,
+                cue.file,
+            ]
             for col, value in enumerate(values):
-                self.table.setItem(row, col, QTableWidgetItem(value))
+                item = QTableWidgetItem(value)
+                if row == playing_row:
+                    item.setBackground(QBrush(PLAYING_COLOUR))
+                if row == playhead:
+                    font = QFont()
+                    font.setBold(True)
+                    item.setFont(font)
+                self.table.setItem(row, col, item)
         self._rebuild_shortcuts()
+        self._refresh_now_label()
+
+    def _refresh_now_label(self) -> None:
+        cues = self.show_model.cues
+        if self._playing_cue is not None:
+            self.now_label.setText(f"NOW  {self._playing_cue.name}")
+            return
+        playhead = self._playhead_row()
+        if playhead >= 0:
+            self.now_label.setText(f"STANDBY  {cues[playhead].name}")
+        else:
+            self.now_label.setText("Standby")
 
     def _rebuild_shortcuts(self) -> None:
         for shortcut in self._shortcuts:
@@ -158,6 +235,13 @@ class MainWindow(QMainWindow):
     def _selected_row(self) -> int:
         rows = self.table.selectionModel().selectedRows()
         return rows[0].row() if rows else -1
+
+    def _playhead_row(self) -> int:
+        """The row GO will play next: the selected row, or the first cue."""
+        if not self.show_model.cues:
+            return -1
+        row = self._selected_row()
+        return row if row >= 0 else 0
 
     # --- Show file actions --------------------------------------------
 
@@ -178,8 +262,12 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Could not open show", str(exc))
             return
         self.show_path = Path(filename)
+        self._hard_stop()
         self._refresh_table()
         self._refresh_title()
+        for cue in self.show_model.cues:
+            if cue.duration_ms == 0:
+                self._probe_duration(cue)
 
     def save_show(self) -> None:
         if self.show_path is None:
@@ -198,13 +286,35 @@ class MainWindow(QMainWindow):
 
     def add_audio_cue(self) -> None:
         filenames, _ = QFileDialog.getOpenFileNames(self, "Add audio cues", "", AUDIO_FILTER)
+        new_cues = []
         for filename in filenames:
             path = Path(filename)
-            self.show_model.cues.append(
-                Cue(number=self.show_model.next_number(), name=path.stem, kind="audio", file=str(path))
-            )
-        if filenames:
+            cue = Cue(number=self.show_model.next_number(), name=path.stem, kind="audio", file=str(path))
+            self.show_model.cues.append(cue)
+            new_cues.append(cue)
+        if new_cues:
             self._refresh_table()
+            for cue in new_cues:
+                self._probe_duration(cue)
+
+    def _probe_duration(self, cue: Cue) -> None:
+        """Load the file in a throwaway player to learn its length."""
+        if cue.kind != "audio" or not cue.file:
+            return
+        probe = QMediaPlayer(self)
+        self._probes.append(probe)
+        probe.durationChanged.connect(lambda ms, c=cue, p=probe: self._on_duration(c, ms, p))
+        probe.setSource(QUrl.fromLocalFile(cue.file))
+
+    def _on_duration(self, cue: Cue, ms: int, probe: QMediaPlayer) -> None:
+        if ms <= 0:
+            return
+        cue.duration_ms = ms
+        probe.stop()
+        if probe in self._probes:
+            self._probes.remove(probe)
+        probe.deleteLater()
+        self._refresh_table()
 
     def edit_row(self, row: int) -> None:
         if not 0 <= row < len(self.show_model.cues):
@@ -225,23 +335,25 @@ class MainWindow(QMainWindow):
         row = self._selected_row()
         if row < 0:
             return
+        if self.show_model.cues[row] is self._playing_cue:
+            self._hard_stop()
         del self.show_model.cues[row]
         self._refresh_table()
 
     def go(self) -> None:
-        row = self._selected_row()
-        if row < 0:
-            row = 0
-        self.go_row(row)
+        row = self._playhead_row()
+        if row >= 0:
+            self.go_row(row)
 
     def go_row(self, row: int) -> None:
-        """Play the cue in this row with its fade-in, then select the next row."""
+        """Play the cue in this row with its fade-in, then move the playhead down."""
         if not 0 <= row < len(self.show_model.cues):
             return
         cue = self.show_model.cues[row]
         if cue.kind == "audio" and cue.file:
             self._stop_fade_timer()
             self.player.setSource(QUrl.fromLocalFile(cue.file))
+            self._playing_cue = cue
             self._playing_fade_out = cue.fade_out
             if cue.fade_in > 0:
                 self._start_fade(0.0, 1.0, cue.fade_in)
@@ -262,6 +374,20 @@ class MainWindow(QMainWindow):
         self._stop_fade_timer()
         self.player.stop()
         self.audio_output.setVolume(1.0)
+
+    # --- Playback state and clock -------------------------------------
+
+    def _on_playback_state(self, state: QMediaPlayer.PlaybackState) -> None:
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self.clock_timer.start()
+        else:
+            self.clock_timer.stop()
+            self._playing_cue = None
+            self._update_clock()
+            self._refresh_table()
+
+    def _update_clock(self) -> None:
+        self.clock_label.setText(format_clock(self.player.position()))
 
     # --- Fade engine --------------------------------------------------
 
@@ -289,6 +415,7 @@ class MainWindow(QMainWindow):
 
 def run() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
+    apply_dark_theme(app)
     window = MainWindow()
     window.show()
     return app.exec()

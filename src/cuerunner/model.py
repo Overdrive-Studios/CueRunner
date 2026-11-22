@@ -18,6 +18,7 @@ class Cue:
     fade_in: float = 0.0  # seconds; fades are not yet applied during playback
     fade_out: float = 0.0
     hotkey: str = ""
+    duration_ms: int = 0  # filled in from the audio file when it is first probed
 
 
 @dataclass
