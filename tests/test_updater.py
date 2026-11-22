@@ -1,3 +1,4 @@
+import shlex
 from pathlib import Path
 
 from cuerunner.updater import (
@@ -35,7 +36,8 @@ def test_windows_script_waits_for_pid_then_swaps_and_relaunches() -> None:
 
 
 def test_macos_script_stages_then_swaps_bundle() -> None:
-    script = macos_swap_script(42, Path("/tmp/CueRunner.dmg"), Path("/Applications/CueRunner.app"))
+    bundle = Path("/Applications/CueRunner.app")
+    script = macos_swap_script(42, Path("/tmp/CueRunner.dmg"), bundle)
     assert "kill -0 42" in script
-    assert "/Applications/CueRunner.app.new" in script
-    assert "xattr -dr com.apple.quarantine /Applications/CueRunner.app" in script
+    assert f"{bundle}.new" in script
+    assert f"xattr -dr com.apple.quarantine {shlex.quote(str(bundle))}" in script
