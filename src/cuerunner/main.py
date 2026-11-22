@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import QThread, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -31,10 +33,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cuerunner import updater
 from cuerunner.fades import FADE_TICK_MS, fade_volumes
 from cuerunner.model import Cue, Show
 from cuerunner.theme import apply_dark_theme
 from cuerunner.timecode import format_clock, format_duration
+from cuerunner.version import __version__
 
 COLUMNS = ["Q", "Cue", "Type", "Duration", "Fade In", "Fade Out", "Hotkey", "File"]
 SHOW_FILTER = "CueRunner show (*.cuerunner.json);;All files (*)"
@@ -42,6 +46,28 @@ AUDIO_FILTER = "Audio files (*.wav *.aiff *.aif *.mp3 *.m4a *.flac *.ogg);;All f
 
 PLAYING_COLOUR = QColor(30, 84, 48)
 PLAYHEAD_MARK = "▶"
+
+
+class _DownloadWorker(QThread):
+    progress = Signal(int)
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, url: str, dest: Path, parent=None) -> None:
+        super().__init__(parent)
+        self._url = url
+        self._dest = dest
+
+    def run(self) -> None:
+        try:
+            path = updater.download(self._url, self._dest, progress=self.progress.emit)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        if self.isInterruptionRequested():
+            self.failed.emit("Download cancelled.")
+            return
+        self.done.emit(str(path))
 
 
 class CueDialog(QDialog):
@@ -109,6 +135,7 @@ class MainWindow(QMainWindow):
         self.clock_timer.timeout.connect(self._update_clock)
 
         self._build_toolbar()
+        self._build_help_menu()
         self._build_central()
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=self.go)
         self._refresh_title()
@@ -133,6 +160,63 @@ class MainWindow(QMainWindow):
             ("Remove Cue", self.remove_cue),
         ]:
             bar.addAction(label, handler)
+
+    def _build_help_menu(self) -> None:
+        help_menu = self.menuBar().addMenu("Help")
+        help_menu.addAction("Check for Updates...", self.check_for_updates)
+        help_menu.addAction(f"About CueRunner {__version__}", self.about)
+
+    def about(self) -> None:
+        QMessageBox.information(self, "About CueRunner", f"CueRunner {__version__}")
+
+    def check_for_updates(self) -> None:
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(self, "Updates", "Updates are only available in the packaged app.")
+            return
+        try:
+            release = updater.fetch_latest_release()
+        except Exception as exc:  # network, JSON, or GitHub errors
+            QMessageBox.warning(self, "Update check failed", f"Could not check for updates:\n{exc}")
+            return
+        if release is None:
+            QMessageBox.information(self, "Updates", "No build for this platform is published yet.")
+            return
+        if not updater.is_newer(release.tag):
+            QMessageBox.information(self, "Updates", f"You have the latest version ({__version__}).")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Update available",
+            f"CueRunner {release.tag} is available (you have {__version__}).\n\n"
+            "Download it now? CueRunner will restart to apply the update.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._download_update(release)
+
+    def _download_update(self, release: updater.Release) -> None:
+        dest = Path(tempfile.mkdtemp(prefix="cuerunner-dl-")) / release.asset_name
+        dialog = QProgressDialog(f"Downloading CueRunner {release.tag}...", "Cancel", 0, 100, self)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+
+        worker = _DownloadWorker(release.asset_url, dest, self)
+        worker.progress.connect(dialog.setValue)
+        worker.failed.connect(lambda msg: (dialog.close(), QMessageBox.critical(self, "Update failed", msg)))
+
+        def finished(path: str) -> None:
+            dialog.close()
+            try:
+                updater.apply_update(Path(path))
+            except Exception as exc:
+                QMessageBox.critical(self, "Update failed", str(exc))
+                return
+            QApplication.quit()
+
+        worker.done.connect(finished)
+        dialog.canceled.connect(worker.requestInterruption)
+        worker.start()
+        self._update_worker = worker  # keep a reference while it runs
 
     def _build_central(self) -> None:
         container = QWidget(self)
