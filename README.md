@@ -10,11 +10,11 @@ Cue-based show control for Windows and macOS. Working name.
 - **Soundboard:** 64 pads across 4 banks. Right-click a pad to assign a file.
 - **Countdown timer** for interval breaks.
 - **Output device:** pick the sound card under Audio → Output Device.
-- **Talkback mic:** auto-gain, gate, compressor, limiter, and feedback suppression. The music lowers while the mic is open. Turn it on under Audio → Talkback Mic On.
+- **Talkback mic:** auto-gain, gate, compressor, limiter, and feedback suppression. The music lowers while the mic is open, by the amount set under Audio → Duck Level. Turn the mic on under Audio → Talkback Mic On.
 - **Venue radio:** shuffled music from a folder, with an ident or promo every N tracks. Set it up under Audio → Venue Radio Settings.
 - **Multitrack recorder:** up to 48 tracks of 24-bit WAV. The file header refreshes every second, so a power cut loses at most about a second. Audio → Record Start.
 - **Phone remote:** a PIN-protected page on your Wi-Fi with GO, STOP, PAUSE, PANIC, and live status. Audio → Start Phone Remote.
-- **MIDI:** notes and control changes trigger the transport, a cue, or a pad. Audio → Start MIDI Input.
+- **MIDI:** notes and control changes trigger the transport, a cue, or a pad. Audio → Start MIDI Input. Edit the key table under Audio → MIDI Mapping.
 - **In-app updates:** Help → Check for Updates downloads the latest release and restarts to apply it.
 
 ## Known limits
@@ -22,7 +22,7 @@ Cue-based show control for Windows and macOS. Working name.
 - **Console control:** Yamaha, Allen & Heath, and Q-SYS control are not built yet. They need each manufacturer's protocol documentation and hardware to test against.
 - **Spotify:** not built. It needs a developer app and a Premium account, and playback runs in a browser.
 - **Stream Deck:** not built as a plugin. The phone remote's HTTP endpoint can be called from a Stream Deck web-request action, using the `X-PIN` header.
-- **MIDI mapping:** the defaults are notes 36 to 39 (GO, STOP, PAUSE, PANIC). They can't be changed in the app yet.
+- **MIDI mapping:** the defaults are notes 36 to 39 (GO, STOP, PAUSE, PANIC). Change them under Audio → MIDI Mapping. The mapping is saved with the show file.
 - **Audio files:** each file is decoded fully into memory when it is first loaded. Very long files use a lot of memory.
 - **File types:** WAV, AIFF, FLAC, OGG, and MP3 are read by the audio library. M4A and AAC are not supported.
 - **Routing:** mono clips go to outputs 1 and 2, and stereo clips go to 1 and 2 as left and right. Routing for more outputs is not built into the app yet.
