@@ -340,6 +340,7 @@ class MainWindow(QMainWindow):
         audio_menu.addAction("Stop MIDI Input", self.stop_midi)
         audio_menu.addAction("MIDI Mapping...", self.edit_midi_mapping)
         audio_menu.addAction("Duck Level...", self.choose_duck_level)
+        audio_menu.addAction("Phone Remote Port...", self.choose_remote_port)
         audio_menu.addSeparator()
         audio_menu.addAction("Start Venue Radio", self.start_radio)
         audio_menu.addAction("Stop Venue Radio", self.stop_radio)
@@ -756,6 +757,7 @@ class MainWindow(QMainWindow):
         if self._remote is not None:
             QMessageBox.information(self, "Phone remote", f"Already running at http://{lan_ip()}:{self._remote.port}")
             return
+        port = self.show_model.remote_port
         pin, ok = QInputDialog.getText(self, "Phone remote", "Choose a PIN for the remote (4 or more digits):")
         if not ok or len(pin.strip()) < 4:
             if ok:
@@ -763,10 +765,14 @@ class MainWindow(QMainWindow):
             return
         try:
             state = RemoteState(pin.strip())
-            server = RemoteServer(state, port=8080)
+            server = RemoteServer(state, port=port)
             server.start()
         except OSError as exc:
-            QMessageBox.critical(self, "Phone remote", f"Could not start the remote on port 8080:\n{exc}")
+            QMessageBox.critical(
+                self,
+                "Phone remote",
+                f"Could not start the remote on port {port}:\n{exc}\n\nChange the port under Audio → Phone Remote Port.",
+            )
             return
         self._remote = server
         self._remote_state = state
@@ -827,6 +833,13 @@ class MainWindow(QMainWindow):
         self.show_model.midi_map = dialog.result_map()
         if self._midi is not None:
             self._midi.set_mapping(self.show_model.midi_map)
+
+    def choose_remote_port(self) -> None:
+        port, ok = QInputDialog.getInt(
+            self, "Phone remote port", "Port for the phone remote (1024 to 65535):", self.show_model.remote_port, 1024, 65535
+        )
+        if ok:
+            self.show_model.remote_port = port
 
     def choose_duck_level(self) -> None:
         percent, ok = QInputDialog.getInt(

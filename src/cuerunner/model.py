@@ -19,6 +19,7 @@ DEFAULT_MIDI_MAP = {
     "note:39": "panic",
 }
 DEFAULT_DUCK_LEVEL = 0.3
+DEFAULT_REMOTE_PORT = 8080
 
 
 @dataclass
@@ -60,6 +61,7 @@ class Show:
     radio: RadioSettings = field(default_factory=RadioSettings)
     midi_map: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MIDI_MAP))
     duck_level: float = DEFAULT_DUCK_LEVEL  # music level while the talkback mic is open, 0 to 1
+    remote_port: int = DEFAULT_REMOTE_PORT
 
     def next_number(self) -> str:
         numbers = []
@@ -79,6 +81,7 @@ class Show:
             "radio": asdict(self.radio),
             "midi_map": dict(self.midi_map),
             "duck_level": self.duck_level,
+            "remote_port": self.remote_port,
         }
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -101,4 +104,5 @@ class Show:
             radio=radio,
             midi_map=dict(midi_map),
             duck_level=duck_level,
+            remote_port=int(data.get("remote_port", DEFAULT_REMOTE_PORT)),
         )

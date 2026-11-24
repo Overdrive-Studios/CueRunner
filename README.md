@@ -13,7 +13,7 @@ Cue-based show control for Windows and macOS. Working name.
 - **Talkback mic:** auto-gain, gate, compressor, limiter, and feedback suppression. The music lowers while the mic is open, by the amount set under Audio → Duck Level. Turn the mic on under Audio → Talkback Mic On.
 - **Venue radio:** shuffled music from a folder, with an ident or promo every N tracks. Set it up under Audio → Venue Radio Settings.
 - **Multitrack recorder:** up to 48 tracks of 24-bit WAV. The file header refreshes every second, so a power cut loses at most about a second. Audio → Record Start.
-- **Phone remote:** a PIN-protected page on your Wi-Fi with GO, STOP, PAUSE, PANIC, and live status. Audio → Start Phone Remote.
+- **Phone remote:** a PIN-protected page on your Wi-Fi with GO, STOP, PAUSE, PANIC, and live status. Audio → Start Phone Remote. The port defaults to 8080 and can be changed under Audio → Phone Remote Port.
 - **MIDI:** notes and control changes trigger the transport, a cue, or a pad. Audio → Start MIDI Input. Edit the key table under Audio → MIDI Mapping.
 - **In-app updates:** Help → Check for Updates downloads the latest release and restarts to apply it.
 

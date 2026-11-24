@@ -52,3 +52,13 @@ def test_old_show_gets_default_midi_map_and_duck_level(tmp_path: Path) -> None:
     loaded = Show.load(path)
     assert loaded.midi_map == DEFAULT_MIDI_MAP
     assert loaded.duck_level == DEFAULT_DUCK_LEVEL
+
+
+def test_remote_port_round_trip_and_default(tmp_path: Path) -> None:
+    from cuerunner.model import DEFAULT_REMOTE_PORT, Show
+
+    path = tmp_path / "port.json"
+    Show(remote_port=9090).save(path)
+    assert Show.load(path).remote_port == 9090
+    path.write_text('{"format_version": 3, "cues": []}', encoding="utf-8")
+    assert Show.load(path).remote_port == DEFAULT_REMOTE_PORT
