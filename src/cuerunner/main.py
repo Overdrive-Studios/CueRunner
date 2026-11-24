@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 from cuerunner import updater
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
+from cuerunner.feedback import FeedbackSuppressor
 from cuerunner.engine import Clip, LiveVoice, Mixer, Voice, default_matrix, load_clip, probe_duration_ms
 from cuerunner.model import Cue, Pad, RadioSettings, Show
 from cuerunner.playlist import Playlist, scan_audio
@@ -869,8 +870,13 @@ class MainWindow(QMainWindow):
             from cuerunner import audio_io
 
             chain = MicChain()
+            suppressor = FeedbackSuppressor(rate=self.mixer.rate)
             voice = LiveVoice(channels=1, matrix=default_matrix(1, self.mixer.out_channels), rate=self.mixer.rate, tag="mic")
-            mic = audio_io.MicInput(self._mic_device, self.mixer.rate, lambda block: voice.push(chain.process(block)))
+            mic = audio_io.MicInput(
+                self._mic_device,
+                self.mixer.rate,
+                lambda block: voice.push(chain.process(suppressor.process(block))),
+            )
             mic.start()
         except Exception as exc:
             QMessageBox.critical(self, "Talkback mic", f"Could not open the mic:\n{exc}")
