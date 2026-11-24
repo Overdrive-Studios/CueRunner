@@ -17,3 +17,11 @@ def format_duration(ms: int) -> str:
         return "-"
     total = round(ms / 1000)
     return f"{total // 60}:{total % 60:02d}"
+
+
+def format_hms(ms: int) -> str:
+    """Total running time: h:mm:ss."""
+    total = max(0, round(ms / 1000))
+    hours, rem = divmod(total, 3600)
+    minutes, seconds = divmod(rem, 60)
+    return f"{hours}:{minutes:02d}:{seconds:02d}"

@@ -4,23 +4,28 @@ from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 STYLESHEET = """
-QPushButton#go {
-    background: #2e9e4f; color: white; font-size: 22px; font-weight: bold;
-    min-width: 120px; min-height: 52px; border-radius: 6px; border: 0;
+QPushButton#go, QPushButton#stop, QPushButton#pause, QPushButton#panic {
+    color: white; font-size: 20px; font-weight: bold;
+    min-height: 70px; border-radius: 4px; border: 0;
 }
+QPushButton#go { background: #2e9e4f; }
 QPushButton#go:hover { background: #36b35a; }
-QPushButton#stop {
-    background: #b03a3a; color: white; font-size: 16px; font-weight: bold;
-    min-width: 90px; min-height: 52px; border-radius: 6px; border: 0;
-}
+QPushButton#stop { background: #b03a3a; }
 QPushButton#stop:hover { background: #c94848; }
-QLabel#now { color: #cfcfcf; font-size: 15px; }
-QLabel#clock {
-    color: #ffffff; font-size: 30px; font-family: Menlo, Consolas, monospace;
+QPushButton#pause { background: #c98a1b; }
+QPushButton#pause:hover { background: #dca030; }
+QPushButton#panic { background: #6e1c1c; }
+QPushButton#panic:hover { background: #8a2626; }
+QLabel#statusTitle { color: #8a8a8f; font-size: 11px; font-weight: bold; }
+QLabel#statusValue {
+    color: #f0f0f0; font-size: 22px; font-weight: bold; font-family: Menlo, Consolas, monospace;
 }
+QLabel#now { color: #cfcfcf; font-size: 14px; }
 QTableWidget {
     gridline-color: #2c2c2f; selection-background-color: #2f4f7a; selection-color: #ffffff;
 }
+QProgressBar { background: #1a1a1c; border: 0; height: 8px; }
+QProgressBar::chunk { background: #3b82d6; }
 QHeaderView::section {
     background: #2a2a2d; color: #aaaaaa; padding: 6px; border: 0;
     border-right: 1px solid #1c1c1e; font-weight: bold;

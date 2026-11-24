@@ -1,9 +1,10 @@
-"""CueRunner main window: a dark cue list with playhead, GO/Stop, fades and hotkeys."""
+"""CueRunner main window: transport controls, cue list with progress, fades, hotkeys and updates."""
 
 from __future__ import annotations
 
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Qt, QTimer, QUrl, Signal
@@ -12,6 +13,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -24,6 +26,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QProgressDialog,
     QPushButton,
     QTableWidget,
@@ -37,10 +40,14 @@ from cuerunner import updater
 from cuerunner.fades import FADE_TICK_MS, fade_volumes
 from cuerunner.model import Cue, Show
 from cuerunner.theme import apply_dark_theme
-from cuerunner.timecode import format_clock, format_duration
+from cuerunner.timecode import format_clock, format_duration, format_hms
 from cuerunner.version import __version__
 
-COLUMNS = ["Q", "Cue", "Type", "Duration", "Fade In", "Fade Out", "Hotkey", "File"]
+COLUMNS = ["#", "Name", "Length", "Fade In", "Fade Out", "Loop", "Progress", "Remaining", "Hotkey", "File"]
+NAME_COL = 1
+PROGRESS_COL = 6
+REMAINING_COL = 7
+
 SHOW_FILTER = "CueRunner show (*.cuerunner.json);;All files (*)"
 AUDIO_FILTER = "Audio files (*.wav *.aiff *.aif *.mp3 *.m4a *.flac *.ogg);;All files (*)"
 
@@ -71,7 +78,7 @@ class _DownloadWorker(QThread):
 
 
 class CueDialog(QDialog):
-    """Edit a cue's name, fades and hotkey."""
+    """Edit a cue's name, fades, loop and hotkey."""
 
     def __init__(self, cue: Cue, parent=None) -> None:
         super().__init__(parent)
@@ -80,6 +87,8 @@ class CueDialog(QDialog):
         self.name_edit = QLineEdit(cue.name)
         self.fade_in = self._fade_spin(cue.fade_in)
         self.fade_out = self._fade_spin(cue.fade_out)
+        self.loop_box = QCheckBox("Loop until stopped")
+        self.loop_box.setChecked(cue.loop)
         self.hotkey_edit = QKeySequenceEdit(QKeySequence(cue.hotkey))
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -90,6 +99,7 @@ class CueDialog(QDialog):
         form.addRow("Name", self.name_edit)
         form.addRow("Fade in", self.fade_in)
         form.addRow("Fade out", self.fade_out)
+        form.addRow("", self.loop_box)
         form.addRow("Hotkey", self.hotkey_edit)
         form.addRow(buttons)
 
@@ -106,6 +116,7 @@ class CueDialog(QDialog):
         cue.name = self.name_edit.text().strip() or cue.name
         cue.fade_in = self.fade_in.value()
         cue.fade_out = self.fade_out.value()
+        cue.loop = self.loop_box.isChecked()
         cue.hotkey = self.hotkey_edit.keySequence().toString()
 
 
@@ -117,6 +128,7 @@ class MainWindow(QMainWindow):
         self._shortcuts: list[QShortcut] = []
         self._probes: list[QMediaPlayer] = []
         self._playing_cue: Cue | None = None
+        self._row_bars: list[QProgressBar] = []
 
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
@@ -133,13 +145,19 @@ class MainWindow(QMainWindow):
         self.clock_timer = QTimer(self)
         self.clock_timer.setInterval(100)
         self.clock_timer.timeout.connect(self._update_clock)
+        self.clock_timer.start()
 
         self._build_toolbar()
         self._build_help_menu()
         self._build_central()
-        QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=self.go)
+
+        go_key = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
+        go_key.activated.connect(self.go)
+        panic_key = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        panic_key.activated.connect(self.panic)
+
         self._refresh_title()
-        self.resize(1100, 620)
+        self.resize(1200, 680)
 
     # --- UI setup -----------------------------------------------------
 
@@ -166,80 +184,54 @@ class MainWindow(QMainWindow):
         help_menu.addAction("Check for Updates...", self.check_for_updates)
         help_menu.addAction(f"About CueRunner {__version__}", self.about)
 
-    def about(self) -> None:
-        QMessageBox.information(self, "About CueRunner", f"CueRunner {__version__}")
+    def _status_title(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("statusTitle")
+        return label
 
-    def check_for_updates(self) -> None:
-        if not getattr(sys, "frozen", False):
-            QMessageBox.information(self, "Updates", "Updates are only available in the packaged app.")
-            return
-        try:
-            release = updater.fetch_latest_release()
-        except Exception as exc:  # network, JSON, or GitHub errors
-            QMessageBox.warning(self, "Update check failed", f"Could not check for updates:\n{exc}")
-            return
-        if release is None:
-            QMessageBox.information(self, "Updates", "No build for this platform is published yet.")
-            return
-        if not updater.is_newer(release.tag):
-            QMessageBox.information(self, "Updates", f"You have the latest version ({__version__}).")
-            return
-        answer = QMessageBox.question(
-            self,
-            "Update available",
-            f"CueRunner {release.tag} is available (you have {__version__}).\n\n"
-            "Download it now? CueRunner will restart to apply the update.",
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self._download_update(release)
-
-    def _download_update(self, release: updater.Release) -> None:
-        dest = Path(tempfile.mkdtemp(prefix="cuerunner-dl-")) / release.asset_name
-        dialog = QProgressDialog(f"Downloading CueRunner {release.tag}...", "Cancel", 0, 100, self)
-        dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        dialog.setMinimumDuration(0)
-
-        worker = _DownloadWorker(release.asset_url, dest, self)
-        worker.progress.connect(dialog.setValue)
-        worker.failed.connect(lambda msg: (dialog.close(), QMessageBox.critical(self, "Update failed", msg)))
-
-        def finished(path: str) -> None:
-            dialog.close()
-            try:
-                updater.apply_update(Path(path))
-            except Exception as exc:
-                QMessageBox.critical(self, "Update failed", str(exc))
-                return
-            QApplication.quit()
-
-        worker.done.connect(finished)
-        dialog.canceled.connect(worker.requestInterruption)
-        worker.start()
-        self._update_worker = worker  # keep a reference while it runs
+    def _status_value(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("statusValue")
+        return label
 
     def _build_central(self) -> None:
         container = QWidget(self)
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        status = QHBoxLayout()
+        self.trt_label = self._status_value("0:00:00")
+        self.track_label = self._status_value(format_clock(0))
+        self.remaining_label = self._status_value(format_clock(0))
+        self.wall_label = self._status_value("--:--:--")
+        status.addWidget(self._status_title("TRT"))
+        status.addWidget(self.trt_label)
+        status.addSpacing(28)
+        status.addWidget(self._status_title("TRACK"))
+        status.addWidget(self.track_label)
+        status.addSpacing(28)
+        status.addWidget(self._status_title("REMAINING"))
+        status.addWidget(self.remaining_label)
+        status.addStretch(1)
+        status.addWidget(self.wall_label)
+        layout.addLayout(status)
 
         transport = QHBoxLayout()
-        self.go_button = QPushButton("GO")
-        self.go_button.setObjectName("go")
-        self.go_button.clicked.connect(self.go)
-        self.stop_button = QPushButton("STOP")
-        self.stop_button.setObjectName("stop")
-        self.stop_button.clicked.connect(self.stop)
+        for text, name, handler, stretch in [
+            ("GO  (Space)", "go", self.go, 3),
+            ("STOP", "stop", self.stop, 2),
+            ("PAUSE", "pause", self.toggle_pause, 2),
+            ("PANIC  (Esc)", "panic", self.panic, 2),
+        ]:
+            button = QPushButton(text)
+            button.setObjectName(name)
+            button.clicked.connect(handler)
+            transport.addWidget(button, stretch)
+        layout.addLayout(transport)
+
         self.now_label = QLabel("Standby")
         self.now_label.setObjectName("now")
-        self.clock_label = QLabel(format_clock(0))
-        self.clock_label.setObjectName("clock")
-        transport.addWidget(self.go_button)
-        transport.addWidget(self.stop_button)
-        transport.addSpacing(16)
-        transport.addWidget(self.now_label, 1)
-        transport.addWidget(self.clock_label)
-        layout.addLayout(transport)
+        layout.addWidget(self.now_label)
 
         self.table = QTableWidget(0, len(COLUMNS), self)
         self.table.setHorizontalHeaderLabels(COLUMNS)
@@ -250,9 +242,10 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(NAME_COL, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(len(COLUMNS) - 1, QHeaderView.ResizeMode.Stretch)
         self.table.setColumnWidth(0, 60)
+        self.table.setColumnWidth(PROGRESS_COL, 140)
         self.table.itemDoubleClicked.connect(lambda item: self.edit_row(item.row()))
         self.table.itemSelectionChanged.connect(self._refresh_now_label)
         layout.addWidget(self.table, 1)
@@ -266,22 +259,24 @@ class MainWindow(QMainWindow):
     def _refresh_table(self) -> None:
         cues = self.show_model.cues
         playhead = self._playhead_row()
-        playing_row = next((i for i, c in enumerate(cues) if c is self._playing_cue), -1)
+        playing_row = self._playing_row()
 
         self.table.setRowCount(len(cues))
+        self._row_bars = []
         for row, cue in enumerate(cues):
             marker = PLAYHEAD_MARK if row == playhead else ""
-            values = [
-                f"{marker} {cue.number}".strip(),
-                cue.name,
-                cue.kind,
-                format_duration(cue.duration_ms),
-                f"{cue.fade_in:g} s",
-                f"{cue.fade_out:g} s",
-                cue.hotkey,
-                cue.file,
-            ]
-            for col, value in enumerate(values):
+            values = {
+                0: f"{marker} {cue.number}".strip(),
+                1: cue.name,
+                2: format_duration(cue.duration_ms),
+                3: f"{cue.fade_in:g} s",
+                4: f"{cue.fade_out:g} s",
+                5: "✓" if cue.loop else "",
+                REMAINING_COL: "",
+                8: cue.hotkey,
+                9: cue.file,
+            }
+            for col, value in values.items():
                 item = QTableWidgetItem(value)
                 if row == playing_row:
                     item.setBackground(QBrush(PLAYING_COLOUR))
@@ -290,17 +285,28 @@ class MainWindow(QMainWindow):
                     font.setBold(True)
                     item.setFont(font)
                 self.table.setItem(row, col, item)
+
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(0)
+            bar.setTextVisible(False)
+            self.table.setCellWidget(row, PROGRESS_COL, bar)
+            self._row_bars.append(bar)
+
+        total_ms = sum(c.duration_ms for c in cues)
+        self.trt_label.setText(format_hms(total_ms))
         self._rebuild_shortcuts()
         self._refresh_now_label()
+        self._update_clock()
 
     def _refresh_now_label(self) -> None:
         cues = self.show_model.cues
         if self._playing_cue is not None:
-            self.now_label.setText(f"NOW  {self._playing_cue.name}")
+            self.now_label.setText(f"NOW   {self._playing_cue.name}")
             return
         playhead = self._playhead_row()
         if playhead >= 0:
-            self.now_label.setText(f"STANDBY  {cues[playhead].name}")
+            self.now_label.setText(f"STANDBY   {cues[playhead].name}")
         else:
             self.now_label.setText("Standby")
 
@@ -326,6 +332,9 @@ class MainWindow(QMainWindow):
             return -1
         row = self._selected_row()
         return row if row >= 0 else 0
+
+    def _playing_row(self) -> int:
+        return next((i for i, c in enumerate(self.show_model.cues) if c is self._playing_cue), -1)
 
     # --- Show file actions --------------------------------------------
 
@@ -437,6 +446,7 @@ class MainWindow(QMainWindow):
         if cue.kind == "audio" and cue.file:
             self._stop_fade_timer()
             self.player.setSource(QUrl.fromLocalFile(cue.file))
+            self.player.setLoops(-1 if cue.loop else 1)
             self._playing_cue = cue
             self._playing_fade_out = cue.fade_out
             if cue.fade_in > 0:
@@ -447,12 +457,26 @@ class MainWindow(QMainWindow):
         self.table.selectRow(min(row + 1, len(self.show_model.cues) - 1))
 
     def stop(self) -> None:
-        if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+        state = self.player.playbackState()
+        if state == QMediaPlayer.PlaybackState.StoppedState:
             return
-        if self._playing_fade_out > 0:
+        if self._playing_fade_out > 0 and state == QMediaPlayer.PlaybackState.PlayingState:
             self._start_fade(self.audio_output.volume(), 0.0, self._playing_fade_out, on_done=self._hard_stop)
         else:
             self._hard_stop()
+
+    def toggle_pause(self) -> None:
+        state = self.player.playbackState()
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+        elif state == QMediaPlayer.PlaybackState.PausedState:
+            self.player.play()
+
+    def panic(self) -> None:
+        """Stop everything immediately, with no fade."""
+        self._hard_stop()
+        self._playing_cue = None
+        self._refresh_table()
 
     def _hard_stop(self) -> None:
         self._stop_fade_timer()
@@ -462,16 +486,28 @@ class MainWindow(QMainWindow):
     # --- Playback state and clock -------------------------------------
 
     def _on_playback_state(self, state: QMediaPlayer.PlaybackState) -> None:
-        if state == QMediaPlayer.PlaybackState.PlayingState:
-            self.clock_timer.start()
-        else:
-            self.clock_timer.stop()
+        if state == QMediaPlayer.PlaybackState.StoppedState:
             self._playing_cue = None
-            self._update_clock()
-            self._refresh_table()
+        self._refresh_table()
 
     def _update_clock(self) -> None:
-        self.clock_label.setText(format_clock(self.player.position()))
+        self.wall_label.setText(datetime.now().strftime("%H:%M:%S"))
+        row = self._playing_row()
+        if row < 0:
+            self.track_label.setText(format_clock(0))
+            self.remaining_label.setText(format_clock(0))
+            return
+
+        position = self.player.position()
+        duration = self.player.duration() or self.show_model.cues[row].duration_ms
+        remaining = max(0, duration - position) if duration > 0 else 0
+        self.track_label.setText(format_clock(position))
+        self.remaining_label.setText(format_clock(remaining))
+        if row < len(self._row_bars) and duration > 0:
+            self._row_bars[row].setValue(min(100, position * 100 // duration))
+        item = self.table.item(row, REMAINING_COL)
+        if item is not None:
+            item.setText(format_clock(remaining))
 
     # --- Fade engine --------------------------------------------------
 
@@ -495,6 +531,60 @@ class MainWindow(QMainWindow):
                 done()
             return
         self.audio_output.setVolume(self._fade_queue.pop(0))
+
+    # --- Help and updates ---------------------------------------------
+
+    def about(self) -> None:
+        QMessageBox.information(self, "About CueRunner", f"CueRunner {__version__}")
+
+    def check_for_updates(self) -> None:
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(self, "Updates", "Updates are only available in the packaged app.")
+            return
+        try:
+            release = updater.fetch_latest_release()
+        except Exception as exc:  # network, JSON, or GitHub errors
+            QMessageBox.warning(self, "Update check failed", f"Could not check for updates:\n{exc}")
+            return
+        if release is None:
+            QMessageBox.information(self, "Updates", "No build for this platform is published yet.")
+            return
+        if not updater.is_newer(release.tag):
+            QMessageBox.information(self, "Updates", f"You have the latest version ({__version__}).")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Update available",
+            f"CueRunner {release.tag} is available (you have {__version__}).\n\n"
+            "Download it now? CueRunner will restart to apply the update.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._download_update(release)
+
+    def _download_update(self, release: updater.Release) -> None:
+        dest = Path(tempfile.mkdtemp(prefix="cuerunner-dl-")) / release.asset_name
+        dialog = QProgressDialog(f"Downloading CueRunner {release.tag}...", "Cancel", 0, 100, self)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+
+        worker = _DownloadWorker(release.asset_url, dest, self)
+        worker.progress.connect(dialog.setValue)
+        worker.failed.connect(lambda msg: (dialog.close(), QMessageBox.critical(self, "Update failed", msg)))
+
+        def finished(path: str) -> None:
+            dialog.close()
+            try:
+                updater.apply_update(Path(path))
+            except Exception as exc:
+                QMessageBox.critical(self, "Update failed", str(exc))
+                return
+            QApplication.quit()
+
+        worker.done.connect(finished)
+        dialog.canceled.connect(worker.requestInterruption)
+        worker.start()
+        self._update_worker = worker  # keep a reference while it runs
 
 
 def run() -> int:
