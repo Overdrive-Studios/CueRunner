@@ -43,7 +43,8 @@ from PySide6.QtWidgets import (
 
 from cuerunner import updater
 from cuerunner.countdown import Countdown
-from cuerunner.engine import Clip, Mixer, Voice, default_matrix, load_clip, probe_duration_ms
+from cuerunner.dsp import MicChain
+from cuerunner.engine import Clip, LiveVoice, Mixer, Voice, default_matrix, load_clip, probe_duration_ms
 from cuerunner.model import Cue, Pad, RadioSettings, Show
 from cuerunner.playlist import Playlist, scan_audio
 from cuerunner.soundboard import Soundboard
@@ -152,6 +153,11 @@ class MainWindow(QMainWindow):
         self._update_worker = None
         self._radio: Playlist | None = None
         self._radio_voice: Voice | None = None
+        self._mic_input = None
+        self._mic_chain: MicChain | None = None
+        self._mic_voice: LiveVoice | None = None
+        self._mic_device = None
+        self.duck_level = 0.3
 
         self._build_toolbar()
         self._build_menus()
@@ -246,6 +252,10 @@ class MainWindow(QMainWindow):
     def _build_menus(self) -> None:
         audio_menu = self.menuBar().addMenu("Audio")
         audio_menu.addAction("Output Device...", self.choose_output)
+        audio_menu.addSeparator()
+        audio_menu.addAction("Talkback Mic On", self.start_talkback)
+        audio_menu.addAction("Talkback Mic Off", self.stop_talkback)
+        audio_menu.addAction("Choose Mic Input...", self.choose_mic)
         audio_menu.addSeparator()
         audio_menu.addAction("Start Venue Radio", self.start_radio)
         audio_menu.addAction("Stop Venue Radio", self.stop_radio)
@@ -545,6 +555,7 @@ class MainWindow(QMainWindow):
                 clip=clip,
                 matrix=default_matrix(clip.channels, self.mixer.out_channels),
                 loop=cue.loop,
+                bed=True,
                 tag=cue,
             )
             if cue.fade_in > 0:
@@ -626,6 +637,8 @@ class MainWindow(QMainWindow):
             self._playing_cue = active
             self._refresh_table()
         self._radio_tick()
+        if self._mic_chain is not None and self.mixer is not None:
+            self.mixer.set_ducked(self._mic_chain.gate_open, self.duck_level)
         self._update_clock()
 
     def _update_clock(self) -> None:
@@ -647,6 +660,60 @@ class MainWindow(QMainWindow):
         item = self.table.item(row, REMAINING_COL)
         if item is not None:
             item.setText(format_clock(remaining_ms))
+
+    # --- Talkback mic -------------------------------------------------
+
+    def choose_mic(self) -> None:
+        try:
+            from cuerunner import audio_io
+
+            devices = audio_io.input_devices()
+        except Exception as exc:
+            QMessageBox.critical(self, "Talkback mic", f"Could not list input devices:\n{exc}")
+            return
+        if not devices:
+            QMessageBox.information(self, "Talkback mic", "No input devices were found.")
+            return
+        names = ["System default"] + [f"{d.name} ({d.channels} ch)" for d in devices]
+        name, ok = QInputDialog.getItem(self, "Mic input", "Choose the talkback input:", names, 0, False)
+        if not ok:
+            return
+        self._mic_device = None if name == names[0] else devices[names.index(name) - 1].index
+
+    def start_talkback(self) -> None:
+        if self.mixer is None:
+            QMessageBox.warning(self, "Talkback mic", "No audio output is open.")
+            return
+        if self._mic_input is not None:
+            return
+        try:
+            from cuerunner import audio_io
+
+            chain = MicChain()
+            voice = LiveVoice(channels=1, matrix=default_matrix(1, self.mixer.out_channels), rate=self.mixer.rate, tag="mic")
+            mic = audio_io.MicInput(self._mic_device, self.mixer.rate, lambda block: voice.push(chain.process(block)))
+            mic.start()
+        except Exception as exc:
+            QMessageBox.critical(self, "Talkback mic", f"Could not open the mic:\n{exc}")
+            return
+        self.mixer.add(voice)
+        self._mic_chain = chain
+        self._mic_voice = voice
+        self._mic_input = mic
+
+    def stop_talkback(self) -> None:
+        if self._mic_input is not None:
+            try:
+                self._mic_input.close()
+            except Exception:
+                pass
+        if self._mic_voice is not None:
+            self._mic_voice.done = True
+        if self.mixer is not None:
+            self.mixer.set_ducked(False)
+        self._mic_input = None
+        self._mic_chain = None
+        self._mic_voice = None
 
     # --- Venue radio --------------------------------------------------
 

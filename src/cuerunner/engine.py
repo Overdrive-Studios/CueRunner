@@ -7,6 +7,7 @@ the mixer to a sound card.
 from __future__ import annotations
 
 import threading
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -187,3 +188,40 @@ class Mixer:
             self._voices = [v for v in self._voices if not v.done]
         np.clip(out, -1.0, 1.0, out=out)
         return out
+
+
+class LiveVoice(Voice):
+    """A voice fed by live audio (talkback mic) instead of a decoded clip.
+
+    Blocks are pushed in from the input thread and read out by the mixer. If the output falls
+    behind, the oldest audio is dropped so latency cannot grow without limit.
+    """
+
+    MAX_BACKLOG_S = 0.2
+
+    def __init__(self, channels: int, matrix: np.ndarray, rate: int, tag=None) -> None:
+        super().__init__(clip=Clip(np.zeros((0, channels), dtype=np.float32)), matrix=matrix, tag=tag)
+        self._rate = rate
+        self._blocks: deque[np.ndarray] = deque()
+        self._pending = np.zeros((0, channels), dtype=np.float32)
+        self._lock = threading.Lock()
+
+    def push(self, block: np.ndarray) -> None:
+        with self._lock:
+            self._blocks.append(np.asarray(block, dtype=np.float32).reshape(len(block), -1))
+
+    def read(self, n: int) -> np.ndarray:
+        with self._lock:
+            while self._blocks:
+                self._pending = np.concatenate([self._pending, self._blocks.popleft()])
+            limit = int(self.MAX_BACKLOG_S * self._rate)
+            if len(self._pending) > limit + n:
+                self._pending = self._pending[-limit:]
+            take = self._pending[:n]
+            self._pending = self._pending[n:]
+        if len(take) < n:
+            take = np.concatenate([take, np.zeros((n - len(take), self.clip.channels), dtype=np.float32)])
+        return take
+
+    def should_end(self) -> bool:
+        return self.done
