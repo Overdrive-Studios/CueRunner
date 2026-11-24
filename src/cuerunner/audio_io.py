@@ -40,13 +40,18 @@ def input_devices() -> list[DeviceInfo]:
 
 
 class MicInput:
-    """Mono capture from one input channel. Each block is handed to on_block on the input thread."""
+    """Capture from an input device. Each block goes to on_block on the input thread.
 
-    def __init__(self, device: int | None, samplerate: int, on_block) -> None:
+    With channels=1 the block is 1-D (the mic). With more channels it is (frames, channels),
+    which is what the recorder uses.
+    """
+
+    def __init__(self, device: int | None, samplerate: int, on_block, channels: int = 1) -> None:
         self._on_block = on_block
+        self._channels = channels
         self.stream = sd.InputStream(
             samplerate=samplerate,
-            channels=1,
+            channels=channels,
             dtype="float32",
             device=device,
             blocksize=BLOCK_SIZE,
@@ -54,7 +59,10 @@ class MicInput:
         )
 
     def _callback(self, indata, frames, time, status) -> None:
-        self._on_block(indata[:, 0].copy())
+        if self._channels == 1:
+            self._on_block(indata[:, 0].copy())
+        else:
+            self._on_block(indata.copy())
 
     def start(self) -> None:
         self.stream.start()

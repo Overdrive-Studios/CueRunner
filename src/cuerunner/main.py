@@ -47,6 +47,7 @@ from cuerunner.dsp import MicChain
 from cuerunner.engine import Clip, LiveVoice, Mixer, Voice, default_matrix, load_clip, probe_duration_ms
 from cuerunner.model import Cue, Pad, RadioSettings, Show
 from cuerunner.playlist import Playlist, scan_audio
+from cuerunner.recorder import MAX_TRACKS, Recorder
 from cuerunner.soundboard import Soundboard
 from cuerunner.theme import apply_dark_theme
 from cuerunner.timecode import format_clock, format_duration, format_hms
@@ -158,6 +159,10 @@ class MainWindow(QMainWindow):
         self._mic_voice: LiveVoice | None = None
         self._mic_device = None
         self.duck_level = 0.3
+        self._recorder: Recorder | None = None
+        self._recorder_input = None
+        self._record_device = None
+        self._record_tracks = MAX_TRACKS
 
         self._build_toolbar()
         self._build_menus()
@@ -256,6 +261,10 @@ class MainWindow(QMainWindow):
         audio_menu.addAction("Talkback Mic On", self.start_talkback)
         audio_menu.addAction("Talkback Mic Off", self.stop_talkback)
         audio_menu.addAction("Choose Mic Input...", self.choose_mic)
+        audio_menu.addSeparator()
+        audio_menu.addAction("Record Start", self.start_recording)
+        audio_menu.addAction("Record Stop", self.stop_recording)
+        audio_menu.addAction("Record Input Settings...", self.choose_record_input)
         audio_menu.addSeparator()
         audio_menu.addAction("Start Venue Radio", self.start_radio)
         audio_menu.addAction("Stop Venue Radio", self.stop_radio)
@@ -637,6 +646,8 @@ class MainWindow(QMainWindow):
             self._playing_cue = active
             self._refresh_table()
         self._radio_tick()
+        if self._recorder is not None:
+            self._recorder.drain()
         if self._mic_chain is not None and self.mixer is not None:
             self.mixer.set_ducked(self._mic_chain.gate_open, self.duck_level)
         self._update_clock()
@@ -660,6 +671,67 @@ class MainWindow(QMainWindow):
         item = self.table.item(row, REMAINING_COL)
         if item is not None:
             item.setText(format_clock(remaining_ms))
+
+    # --- Multitrack recording -----------------------------------------
+
+    def choose_record_input(self) -> None:
+        try:
+            from cuerunner import audio_io
+
+            devices = audio_io.input_devices()
+        except Exception as exc:
+            QMessageBox.critical(self, "Recorder", f"Could not list input devices:\n{exc}")
+            return
+        if not devices:
+            QMessageBox.information(self, "Recorder", "No input devices were found.")
+            return
+        names = [f"{d.name} ({d.channels} ch)" for d in devices]
+        name, ok = QInputDialog.getItem(self, "Record input", "Choose the input device:", names, 0, False)
+        if not ok:
+            return
+        chosen = devices[names.index(name)]
+        self._record_device = chosen.index
+        tracks, ok = QInputDialog.getInt(
+            self, "Tracks", "How many tracks to record:", min(chosen.channels, MAX_TRACKS), 1, min(chosen.channels, MAX_TRACKS)
+        )
+        if ok:
+            self._record_tracks = tracks
+
+    def start_recording(self) -> None:
+        if self._recorder is not None:
+            return
+        if self.mixer is None:
+            QMessageBox.warning(self, "Recorder", "No audio output is open.")
+            return
+        default_name = f"recording-{datetime.now():%Y%m%d-%H%M%S}.wav"
+        filename, _ = QFileDialog.getSaveFileName(self, "Save recording", default_name, "WAV files (*.wav)")
+        if not filename:
+            return
+        try:
+            from cuerunner import audio_io
+
+            recorder = Recorder(filename, rate=self.mixer.rate, tracks=self._record_tracks)
+            mic = audio_io.MicInput(
+                self._record_device, self.mixer.rate, recorder.push, channels=self._record_tracks
+            )
+            mic.start()
+        except Exception as exc:
+            QMessageBox.critical(self, "Recorder", f"Could not start recording:\n{exc}")
+            return
+        self._recorder = recorder
+        self._recorder_input = mic
+
+    def stop_recording(self) -> None:
+        if self._recorder is None:
+            return
+        try:
+            if self._recorder_input is not None:
+                self._recorder_input.close()
+            self._recorder.close()
+        except Exception as exc:
+            QMessageBox.warning(self, "Recorder", f"Problem closing the recording:\n{exc}")
+        self._recorder = None
+        self._recorder_input = None
 
     # --- Talkback mic -------------------------------------------------
 
