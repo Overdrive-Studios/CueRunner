@@ -23,9 +23,9 @@ Cue-based show control for Windows and macOS. Working name.
 - **Spotify:** not built. It needs a developer app and a Premium account, and playback runs in a browser.
 - **Stream Deck:** not built as a plugin. The phone remote's HTTP endpoint can be called from a Stream Deck web-request action, using the `X-PIN` header.
 - **MIDI mapping:** the defaults are notes 36 to 39 (GO, STOP, PAUSE, PANIC). They can't be changed in the app yet.
-- **Audio files:** whole files are decoded into memory when first used. Very long files use a lot of memory.
-- **M4A and AAC:** not supported. Use WAV, AIFF, FLAC, OGG, or MP3.
-- **Continue and overlaps:** cues can overlap, but there is no separate per-cue output routing yet. Everything goes to the first two outputs.
+- **Audio files:** each file is decoded fully into memory when it is first loaded. Very long files use a lot of memory.
+- **File types:** WAV, AIFF, FLAC, OGG, and MP3 are read by the audio library. M4A and AAC are not supported.
+- **Routing:** mono clips go to outputs 1 and 2, and stereo clips go to 1 and 2 as left and right. Routing for more outputs is not built into the app yet.
 - **ASIO and Dante:** these depend on the audio library being built with ASIO support, and on your interface's driver. Check on your own machine.
 - **Untested on hardware:** the logic is covered by tests, but the window, audio output, mic, recorder, and remote have not been run on real Windows or macOS hardware.
 
