@@ -9,7 +9,7 @@ import numpy as np
 
 
 def _db(linear: float) -> float:
-    return 20.0 * np.log10(max(linear, 1e-12))
+    return float(20.0 * np.log10(max(linear, 1e-12)))
 
 
 def _linear(db: float) -> float:
