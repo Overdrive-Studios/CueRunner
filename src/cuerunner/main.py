@@ -1,4 +1,4 @@
-"""CueRunner main window: transport controls, cue list with progress, fades, hotkeys and updates."""
+"""CueRunner main window: transport, cue list, soundboard, countdown, follow cues, fades, hotkeys, updates."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -37,16 +38,18 @@ from PySide6.QtWidgets import (
 )
 
 from cuerunner import updater
+from cuerunner.countdown import Countdown
 from cuerunner.fades import FADE_TICK_MS, fade_volumes
-from cuerunner.model import Cue, Show
+from cuerunner.model import Cue, Pad, Show
+from cuerunner.soundboard import Soundboard
 from cuerunner.theme import apply_dark_theme
 from cuerunner.timecode import format_clock, format_duration, format_hms
 from cuerunner.version import __version__
 
-COLUMNS = ["#", "Name", "Length", "Fade In", "Fade Out", "Loop", "Progress", "Remaining", "Hotkey", "File"]
+COLUMNS = ["#", "Name", "Length", "Fade In", "Fade Out", "Loop", "Then", "Progress", "Remaining", "Hotkey", "File"]
+PROGRESS_COL = 7
+REMAINING_COL = 8
 NAME_COL = 1
-PROGRESS_COL = 6
-REMAINING_COL = 7
 
 SHOW_FILTER = "CueRunner show (*.cuerunner.json);;All files (*)"
 AUDIO_FILTER = "Audio files (*.wav *.aiff *.aif *.mp3 *.m4a *.flac *.ogg);;All files (*)"
@@ -78,7 +81,7 @@ class _DownloadWorker(QThread):
 
 
 class CueDialog(QDialog):
-    """Edit a cue's name, fades, loop and hotkey."""
+    """Edit a cue's name, fades, loop, follow and hotkey."""
 
     def __init__(self, cue: Cue, parent=None) -> None:
         super().__init__(parent)
@@ -89,6 +92,10 @@ class CueDialog(QDialog):
         self.fade_out = self._fade_spin(cue.fade_out)
         self.loop_box = QCheckBox("Loop until stopped")
         self.loop_box.setChecked(cue.loop)
+        self.then_box = QComboBox()
+        self.then_box.addItem("Nothing", "none")
+        self.then_box.addItem("Follow: start the next cue when this one ends", "follow")
+        self.then_box.setCurrentIndex(max(0, self.then_box.findData(cue.then)))
         self.hotkey_edit = QKeySequenceEdit(QKeySequence(cue.hotkey))
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -100,6 +107,7 @@ class CueDialog(QDialog):
         form.addRow("Fade in", self.fade_in)
         form.addRow("Fade out", self.fade_out)
         form.addRow("", self.loop_box)
+        form.addRow("Then", self.then_box)
         form.addRow("Hotkey", self.hotkey_edit)
         form.addRow(buttons)
 
@@ -117,6 +125,7 @@ class CueDialog(QDialog):
         cue.fade_in = self.fade_in.value()
         cue.fade_out = self.fade_out.value()
         cue.loop = self.loop_box.isChecked()
+        cue.then = self.then_box.currentData()
         cue.hotkey = self.hotkey_edit.keySequence().toString()
 
 
@@ -127,13 +136,17 @@ class MainWindow(QMainWindow):
         self.show_path: Path | None = None
         self._shortcuts: list[QShortcut] = []
         self._probes: list[QMediaPlayer] = []
+        self._pad_players: list[QMediaPlayer] = []
         self._playing_cue: Cue | None = None
+        self._current_row: int | None = None
+        self._user_stop = False
         self._row_bars: list[QProgressBar] = []
 
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
         self.player.setAudioOutput(self.audio_output)
         self.player.playbackStateChanged.connect(self._on_playback_state)
+        self.player.mediaStatusChanged.connect(self._on_media_status)
 
         self._playing_fade_out = 0.0
         self._fade_queue: list[float] = []
@@ -157,7 +170,7 @@ class MainWindow(QMainWindow):
         panic_key.activated.connect(self.panic)
 
         self._refresh_title()
-        self.resize(1200, 680)
+        self.resize(1200, 820)
 
     # --- UI setup -----------------------------------------------------
 
@@ -250,6 +263,16 @@ class MainWindow(QMainWindow):
         self.table.itemSelectionChanged.connect(self._refresh_now_label)
         layout.addWidget(self.table, 1)
 
+        bottom = QHBoxLayout()
+        self.countdown = Countdown(self)
+        self.soundboard = Soundboard(self)
+        self.soundboard.padPressed.connect(self._on_pad_pressed)
+        self.soundboard.padAssign.connect(self._assign_pad)
+        self.soundboard.padClear.connect(self._clear_pad)
+        bottom.addWidget(self.countdown, 1)
+        bottom.addWidget(self.soundboard, 3)
+        layout.addLayout(bottom)
+
         self.setCentralWidget(container)
 
     def _refresh_title(self) -> None:
@@ -265,18 +288,22 @@ class MainWindow(QMainWindow):
         self._row_bars = []
         for row, cue in enumerate(cues):
             marker = PLAYHEAD_MARK if row == playhead else ""
-            values = {
-                0: f"{marker} {cue.number}".strip(),
-                1: cue.name,
-                2: format_duration(cue.duration_ms),
-                3: f"{cue.fade_in:g} s",
-                4: f"{cue.fade_out:g} s",
-                5: "✓" if cue.loop else "",
-                REMAINING_COL: "",
-                8: cue.hotkey,
-                9: cue.file,
-            }
-            for col, value in values.items():
+            values = [
+                f"{marker} {cue.number}".strip(),
+                cue.name,
+                format_duration(cue.duration_ms),
+                f"{cue.fade_in:g} s",
+                f"{cue.fade_out:g} s",
+                "✓" if cue.loop else "",
+                "Follow" if cue.then == "follow" else "",
+                "",
+                "",
+                cue.hotkey,
+                cue.file,
+            ]
+            for col, value in enumerate(values):
+                if col == PROGRESS_COL:
+                    continue
                 item = QTableWidgetItem(value)
                 if row == playing_row:
                     item.setBackground(QBrush(PLAYING_COLOUR))
@@ -295,6 +322,7 @@ class MainWindow(QMainWindow):
 
         total_ms = sum(c.duration_ms for c in cues)
         self.trt_label.setText(format_hms(total_ms))
+        self.soundboard.set_pads(self.show_model.pads)
         self._rebuild_shortcuts()
         self._refresh_now_label()
         self._update_clock()
@@ -445,6 +473,8 @@ class MainWindow(QMainWindow):
         cue = self.show_model.cues[row]
         if cue.kind == "audio" and cue.file:
             self._stop_fade_timer()
+            self._user_stop = False
+            self._current_row = row
             self.player.setSource(QUrl.fromLocalFile(cue.file))
             self.player.setLoops(-1 if cue.loop else 1)
             self._playing_cue = cue
@@ -460,6 +490,7 @@ class MainWindow(QMainWindow):
         state = self.player.playbackState()
         if state == QMediaPlayer.PlaybackState.StoppedState:
             return
+        self._user_stop = True
         if self._playing_fade_out > 0 and state == QMediaPlayer.PlaybackState.PlayingState:
             self._start_fade(self.audio_output.volume(), 0.0, self._playing_fade_out, on_done=self._hard_stop)
         else:
@@ -474,6 +505,8 @@ class MainWindow(QMainWindow):
 
     def panic(self) -> None:
         """Stop everything immediately, with no fade."""
+        self._user_stop = True
+        self._current_row = None
         self._hard_stop()
         self._playing_cue = None
         self._refresh_table()
@@ -482,6 +515,50 @@ class MainWindow(QMainWindow):
         self._stop_fade_timer()
         self.player.stop()
         self.audio_output.setVolume(1.0)
+
+    def _on_media_status(self, status: QMediaPlayer.MediaStatus) -> None:
+        """Follow cues: when a cue finishes naturally, start the next one."""
+        if status != QMediaPlayer.MediaStatus.EndOfMedia or self._user_stop:
+            return
+        if self._current_row is None or not 0 <= self._current_row < len(self.show_model.cues):
+            return
+        cue = self.show_model.cues[self._current_row]
+        if cue.then == "follow" and self._current_row + 1 < len(self.show_model.cues):
+            self.go_row(self._current_row + 1)
+
+    # --- Soundboard ---------------------------------------------------
+
+    def _on_pad_pressed(self, index: int) -> None:
+        pad = self.show_model.pads[index]
+        if pad.file:
+            self._play_pad(pad.file)
+
+    def _play_pad(self, filename: str) -> None:
+        """Pads use their own player, so they play over the show without stopping it."""
+        player = QMediaPlayer(self)
+        output = QAudioOutput(player)
+        player.setAudioOutput(output)
+        output.setVolume(1.0)
+        player.playbackStateChanged.connect(lambda state, p=player: self._cleanup_pad(p, state))
+        player.setSource(QUrl.fromLocalFile(filename))
+        self._pad_players.append(player)
+        player.play()
+
+    def _cleanup_pad(self, player: QMediaPlayer, state: QMediaPlayer.PlaybackState) -> None:
+        if state == QMediaPlayer.PlaybackState.StoppedState and player in self._pad_players:
+            self._pad_players.remove(player)
+            player.deleteLater()
+
+    def _assign_pad(self, index: int) -> None:
+        filename, _ = QFileDialog.getOpenFileName(self, "Assign pad", "", AUDIO_FILTER)
+        if not filename:
+            return
+        self.show_model.pads[index] = Pad(name=Path(filename).stem, file=filename)
+        self.soundboard.set_pads(self.show_model.pads)
+
+    def _clear_pad(self, index: int) -> None:
+        self.show_model.pads[index] = Pad()
+        self.soundboard.set_pads(self.show_model.pads)
 
     # --- Playback state and clock -------------------------------------
 

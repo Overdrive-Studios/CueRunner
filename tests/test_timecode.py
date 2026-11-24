@@ -1,4 +1,4 @@
-from cuerunner.timecode import format_clock, format_duration, format_hms
+from cuerunner.timecode import format_clock, format_duration, format_hms, format_mmss
 
 
 def test_clock_shows_minutes_seconds_tenths() -> None:
@@ -21,3 +21,9 @@ def test_hms_for_total_running_time() -> None:
     assert format_hms(0) == "0:00:00"
     assert format_hms(223_000) == "0:03:43"
     assert format_hms(3_725_000) == "1:02:05"
+
+
+def test_countdown_mmss() -> None:
+    assert format_mmss(0) == "00:00"
+    assert format_mmss(90) == "01:30"
+    assert format_mmss(-5) == "00:00"

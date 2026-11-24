@@ -1,4 +1,4 @@
-"""Time formatting for the cue list and transport clock."""
+"""Time formatting for the cue list, transport clock and countdown."""
 
 from __future__ import annotations
 
@@ -25,3 +25,10 @@ def format_hms(ms: int) -> str:
     hours, rem = divmod(total, 3600)
     minutes, seconds = divmod(rem, 60)
     return f"{hours}:{minutes:02d}:{seconds:02d}"
+
+
+def format_mmss(seconds: int) -> str:
+    """Countdown display: mm:ss."""
+    seconds = max(0, seconds)
+    minutes, secs = divmod(seconds, 60)
+    return f"{minutes:02d}:{secs:02d}"
