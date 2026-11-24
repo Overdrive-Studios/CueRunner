@@ -1,4 +1,8 @@
-"""CueRunner main window: transport, cue list, soundboard, countdown, follow cues, fades, hotkeys, updates."""
+"""CueRunner main window: transport, cue list, soundboard, countdown, follow and continue cues, updates.
+
+Playback runs on cuerunner.engine. Cues and soundboard pads are voices in one mixer, so
+they can overlap, and the mixer is fed to the sound card by audio_io.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +11,8 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QThread, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -22,6 +25,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QKeySequenceEdit,
     QLabel,
     QLineEdit,
@@ -39,7 +43,7 @@ from PySide6.QtWidgets import (
 
 from cuerunner import updater
 from cuerunner.countdown import Countdown
-from cuerunner.fades import FADE_TICK_MS, fade_volumes
+from cuerunner.engine import Clip, Mixer, Voice, default_matrix, load_clip, probe_duration_ms
 from cuerunner.model import Cue, Pad, Show
 from cuerunner.soundboard import Soundboard
 from cuerunner.theme import apply_dark_theme
@@ -50,9 +54,11 @@ COLUMNS = ["#", "Name", "Length", "Fade In", "Fade Out", "Loop", "Then", "Progre
 PROGRESS_COL = 7
 REMAINING_COL = 8
 NAME_COL = 1
+MAX_CHANNELS = 64
 
 SHOW_FILTER = "CueRunner show (*.cuerunner.json);;All files (*)"
-AUDIO_FILTER = "Audio files (*.wav *.aiff *.aif *.mp3 *.m4a *.flac *.ogg);;All files (*)"
+AUDIO_FILTER = "Audio files (*.wav *.aiff *.aif *.mp3 *.flac *.ogg);;All files (*)"
+THEN_LABELS = {"none": "", "follow": "Follow", "continue": "Continue"}
 
 PLAYING_COLOUR = QColor(30, 84, 48)
 PLAYHEAD_MARK = "▶"
@@ -81,7 +87,7 @@ class _DownloadWorker(QThread):
 
 
 class CueDialog(QDialog):
-    """Edit a cue's name, fades, loop, follow and hotkey."""
+    """Edit a cue's name, fades, loop, follow/continue and hotkey."""
 
     def __init__(self, cue: Cue, parent=None) -> None:
         super().__init__(parent)
@@ -95,6 +101,7 @@ class CueDialog(QDialog):
         self.then_box = QComboBox()
         self.then_box.addItem("Nothing", "none")
         self.then_box.addItem("Follow: start the next cue when this one ends", "follow")
+        self.then_box.addItem("Continue: start the next cue at the same time", "continue")
         self.then_box.setCurrentIndex(max(0, self.then_box.findData(cue.then)))
         self.hotkey_edit = QKeySequenceEdit(QKeySequence(cue.hotkey))
 
@@ -135,33 +142,16 @@ class MainWindow(QMainWindow):
         self.show_model = Show()
         self.show_path: Path | None = None
         self._shortcuts: list[QShortcut] = []
-        self._probes: list[QMediaPlayer] = []
-        self._pad_players: list[QMediaPlayer] = []
+        self._clips: dict[str, Clip] = {}
+        self._cue_voices: list[Voice] = []
         self._playing_cue: Cue | None = None
-        self._current_row: int | None = None
-        self._user_stop = False
         self._row_bars: list[QProgressBar] = []
-
-        self.player = QMediaPlayer(self)
-        self.audio_output = QAudioOutput(self)
-        self.player.setAudioOutput(self.audio_output)
-        self.player.playbackStateChanged.connect(self._on_playback_state)
-        self.player.mediaStatusChanged.connect(self._on_media_status)
-
-        self._playing_fade_out = 0.0
-        self._fade_queue: list[float] = []
-        self._fade_done = None
-        self.fade_timer = QTimer(self)
-        self.fade_timer.setInterval(FADE_TICK_MS)
-        self.fade_timer.timeout.connect(self._fade_tick)
-
-        self.clock_timer = QTimer(self)
-        self.clock_timer.setInterval(100)
-        self.clock_timer.timeout.connect(self._update_clock)
-        self.clock_timer.start()
+        self.mixer: Mixer | None = None
+        self.output = None
+        self._update_worker = None
 
         self._build_toolbar()
-        self._build_help_menu()
+        self._build_menus()
         self._build_central()
 
         go_key = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
@@ -169,8 +159,66 @@ class MainWindow(QMainWindow):
         panic_key = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         panic_key.activated.connect(self.panic)
 
+        self.clock_timer = QTimer(self)
+        self.clock_timer.setInterval(100)
+        self.clock_timer.timeout.connect(self._tick)
+        self.clock_timer.start()
+
+        self._open_default_output()
         self._refresh_title()
         self.resize(1200, 820)
+
+    # --- Audio output -------------------------------------------------
+
+    def _open_default_output(self) -> None:
+        try:
+            from cuerunner import audio_io
+
+            self._open_output(audio_io.default_output())
+        except Exception as exc:
+            QMessageBox.critical(self, "Audio output", f"No audio output could be opened:\n{exc}")
+
+    def _open_output(self, device) -> None:
+        from cuerunner import audio_io
+
+        channels = min(device.channels, MAX_CHANNELS)
+        mixer = Mixer(rate=int(device.samplerate), out_channels=channels)
+        output = audio_io.AudioOutput(mixer, device)
+        output.start()
+        if self.output is not None:
+            self.output.close()
+        self.output = output
+        self.mixer = mixer
+        self._clips = {}
+        self._cue_voices = []
+        self._playing_cue = None
+
+    def choose_output(self) -> None:
+        try:
+            from cuerunner import audio_io
+
+            devices = audio_io.output_devices()
+        except Exception as exc:
+            QMessageBox.critical(self, "Audio output", f"Could not list audio devices:\n{exc}")
+            return
+        if not devices:
+            QMessageBox.information(self, "Audio output", "No audio output devices were found.")
+            return
+        names = [f"{d.name} ({d.channels} ch)" for d in devices]
+        name, ok = QInputDialog.getItem(self, "Output device", "Choose the output device:", names, 0, False)
+        if not ok:
+            return
+        try:
+            self._open_output(devices[names.index(name)])
+        except Exception as exc:
+            QMessageBox.critical(self, "Audio output", f"Could not open that device:\n{exc}")
+
+    def _clip(self, path: str) -> Clip:
+        if self.mixer is None:
+            raise RuntimeError("No audio output is open.")
+        if path not in self._clips:
+            self._clips[path] = load_clip(path, self.mixer.rate)
+        return self._clips[path]
 
     # --- UI setup -----------------------------------------------------
 
@@ -192,7 +240,9 @@ class MainWindow(QMainWindow):
         ]:
             bar.addAction(label, handler)
 
-    def _build_help_menu(self) -> None:
+    def _build_menus(self) -> None:
+        audio_menu = self.menuBar().addMenu("Audio")
+        audio_menu.addAction("Output Device...", self.choose_output)
         help_menu = self.menuBar().addMenu("Help")
         help_menu.addAction("Check for Updates...", self.check_for_updates)
         help_menu.addAction(f"About CueRunner {__version__}", self.about)
@@ -230,16 +280,22 @@ class MainWindow(QMainWindow):
         layout.addLayout(status)
 
         transport = QHBoxLayout()
-        for text, name, handler, stretch in [
-            ("GO  (Space)", "go", self.go, 3),
-            ("STOP", "stop", self.stop, 2),
-            ("PAUSE", "pause", self.toggle_pause, 2),
-            ("PANIC  (Esc)", "panic", self.panic, 2),
-        ]:
-            button = QPushButton(text)
-            button.setObjectName(name)
-            button.clicked.connect(handler)
-            transport.addWidget(button, stretch)
+        self.go_button = QPushButton("GO  (Space)")
+        self.go_button.setObjectName("go")
+        self.go_button.clicked.connect(self.go)
+        self.stop_button = QPushButton("STOP")
+        self.stop_button.setObjectName("stop")
+        self.stop_button.clicked.connect(self.stop)
+        self.pause_button = QPushButton("PAUSE")
+        self.pause_button.setObjectName("pause")
+        self.pause_button.clicked.connect(self.toggle_pause)
+        self.panic_button = QPushButton("PANIC  (Esc)")
+        self.panic_button.setObjectName("panic")
+        self.panic_button.clicked.connect(self.panic)
+        transport.addWidget(self.go_button, 3)
+        transport.addWidget(self.stop_button, 2)
+        transport.addWidget(self.pause_button, 2)
+        transport.addWidget(self.panic_button, 2)
         layout.addLayout(transport)
 
         self.now_label = QLabel("Standby")
@@ -282,7 +338,7 @@ class MainWindow(QMainWindow):
     def _refresh_table(self) -> None:
         cues = self.show_model.cues
         playhead = self._playhead_row()
-        playing_row = self._playing_row()
+        playing_row = self._row_of(self._playing_cue)
 
         self.table.setRowCount(len(cues))
         self._row_bars = []
@@ -295,7 +351,7 @@ class MainWindow(QMainWindow):
                 f"{cue.fade_in:g} s",
                 f"{cue.fade_out:g} s",
                 "✓" if cue.loop else "",
-                "Follow" if cue.then == "follow" else "",
+                THEN_LABELS.get(cue.then, ""),
                 "",
                 "",
                 cue.hotkey,
@@ -361,13 +417,15 @@ class MainWindow(QMainWindow):
         row = self._selected_row()
         return row if row >= 0 else 0
 
-    def _playing_row(self) -> int:
-        return next((i for i, c in enumerate(self.show_model.cues) if c is self._playing_cue), -1)
+    def _row_of(self, cue: Cue | None) -> int:
+        if cue is None:
+            return -1
+        return next((i for i, c in enumerate(self.show_model.cues) if c is cue), -1)
 
     # --- Show file actions --------------------------------------------
 
     def new_show(self) -> None:
-        self._hard_stop()
+        self.panic()
         self.show_model = Show()
         self.show_path = None
         self._refresh_table()
@@ -383,7 +441,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Could not open show", str(exc))
             return
         self.show_path = Path(filename)
-        self._hard_stop()
+        self.panic()
         self._refresh_table()
         self._refresh_title()
         for cue in self.show_model.cues:
@@ -414,28 +472,17 @@ class MainWindow(QMainWindow):
             self.show_model.cues.append(cue)
             new_cues.append(cue)
         if new_cues:
-            self._refresh_table()
             for cue in new_cues:
                 self._probe_duration(cue)
+            self._refresh_table()
 
     def _probe_duration(self, cue: Cue) -> None:
-        """Load the file in a throwaway player to learn its length."""
         if cue.kind != "audio" or not cue.file:
             return
-        probe = QMediaPlayer(self)
-        self._probes.append(probe)
-        probe.durationChanged.connect(lambda ms, c=cue, p=probe: self._on_duration(c, ms, p))
-        probe.setSource(QUrl.fromLocalFile(cue.file))
-
-    def _on_duration(self, cue: Cue, ms: int, probe: QMediaPlayer) -> None:
-        if ms <= 0:
-            return
-        cue.duration_ms = ms
-        probe.stop()
-        if probe in self._probes:
-            self._probes.remove(probe)
-        probe.deleteLater()
-        self._refresh_table()
+        try:
+            cue.duration_ms = probe_duration_ms(cue.file)
+        except Exception:
+            cue.duration_ms = 0
 
     def edit_row(self, row: int) -> None:
         if not 0 <= row < len(self.show_model.cues):
@@ -456,8 +503,10 @@ class MainWindow(QMainWindow):
         row = self._selected_row()
         if row < 0:
             return
-        if self.show_model.cues[row] is self._playing_cue:
-            self._hard_stop()
+        cue = self.show_model.cues[row]
+        for voice in self._cue_voices:
+            if voice.tag is cue:
+                voice.done = True
         del self.show_model.cues[row]
         self._refresh_table()
 
@@ -466,88 +515,76 @@ class MainWindow(QMainWindow):
         if row >= 0:
             self.go_row(row)
 
-    def go_row(self, row: int) -> None:
-        """Play the cue in this row with its fade-in, then move the playhead down."""
-        if not 0 <= row < len(self.show_model.cues):
+    def go_row(self, row: int, replace: bool = True) -> None:
+        """Start the cue in this row with its fade-in and move the playhead down.
+
+        replace=True fades out whatever cue is already playing. replace=False lets it run on.
+        """
+        cues = self.show_model.cues
+        if self.mixer is None or not 0 <= row < len(cues):
             return
-        cue = self.show_model.cues[row]
+        cue = cues[row]
         if cue.kind == "audio" and cue.file:
-            self._stop_fade_timer()
-            self._user_stop = False
-            self._current_row = row
-            self.player.setSource(QUrl.fromLocalFile(cue.file))
-            self.player.setLoops(-1 if cue.loop else 1)
-            self._playing_cue = cue
-            self._playing_fade_out = cue.fade_out
+            try:
+                clip = self._clip(cue.file)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
+                return
+            if replace:
+                for voice in self._cue_voices:
+                    if not voice.done and not voice.stop_when_done:
+                        self.mixer.fade_out(voice, voice.tag.fade_out)
+            voice = Voice(
+                clip=clip,
+                matrix=default_matrix(clip.channels, self.mixer.out_channels),
+                loop=cue.loop,
+                tag=cue,
+            )
             if cue.fade_in > 0:
-                self._start_fade(0.0, 1.0, cue.fade_in)
-            else:
-                self.audio_output.setVolume(1.0)
-            self.player.play()
-        self.table.selectRow(min(row + 1, len(self.show_model.cues) - 1))
+                voice.env = 0.0
+                voice.fade(1.0, cue.fade_in, self.mixer.rate)
+            self.mixer.add(voice)
+            self._cue_voices.append(voice)
+            self._playing_cue = cue
+            if cue.then == "continue" and row + 1 < len(cues):
+                self.go_row(row + 1, replace=False)
+        self.table.selectRow(min(row + 1, len(cues) - 1))
 
     def stop(self) -> None:
-        state = self.player.playbackState()
-        if state == QMediaPlayer.PlaybackState.StoppedState:
+        if self.mixer is None:
             return
-        self._user_stop = True
-        if self._playing_fade_out > 0 and state == QMediaPlayer.PlaybackState.PlayingState:
-            self._start_fade(self.audio_output.volume(), 0.0, self._playing_fade_out, on_done=self._hard_stop)
-        else:
-            self._hard_stop()
+        for voice in self._cue_voices:
+            if not voice.done and not voice.stop_when_done:
+                self.mixer.fade_out(voice, voice.tag.fade_out)
 
     def toggle_pause(self) -> None:
-        state = self.player.playbackState()
-        if state == QMediaPlayer.PlaybackState.PlayingState:
-            self.player.pause()
-        elif state == QMediaPlayer.PlaybackState.PausedState:
-            self.player.play()
+        if self.mixer is None:
+            return
+        self.mixer.paused = not self.mixer.paused
+        self.pause_button.setText("RESUME" if self.mixer.paused else "PAUSE")
 
     def panic(self) -> None:
-        """Stop everything immediately, with no fade."""
-        self._user_stop = True
-        self._current_row = None
-        self._hard_stop()
+        """Stop everything immediately, with no fade, including pads."""
+        if self.mixer is not None:
+            self.mixer.clear()
+            self.mixer.paused = False
+        self._cue_voices = []
         self._playing_cue = None
+        self.pause_button.setText("PAUSE")
         self._refresh_table()
-
-    def _hard_stop(self) -> None:
-        self._stop_fade_timer()
-        self.player.stop()
-        self.audio_output.setVolume(1.0)
-
-    def _on_media_status(self, status: QMediaPlayer.MediaStatus) -> None:
-        """Follow cues: when a cue finishes naturally, start the next one."""
-        if status != QMediaPlayer.MediaStatus.EndOfMedia or self._user_stop:
-            return
-        if self._current_row is None or not 0 <= self._current_row < len(self.show_model.cues):
-            return
-        cue = self.show_model.cues[self._current_row]
-        if cue.then == "follow" and self._current_row + 1 < len(self.show_model.cues):
-            self.go_row(self._current_row + 1)
 
     # --- Soundboard ---------------------------------------------------
 
     def _on_pad_pressed(self, index: int) -> None:
         pad = self.show_model.pads[index]
-        if pad.file:
-            self._play_pad(pad.file)
-
-    def _play_pad(self, filename: str) -> None:
-        """Pads use their own player, so they play over the show without stopping it."""
-        player = QMediaPlayer(self)
-        output = QAudioOutput(player)
-        player.setAudioOutput(output)
-        output.setVolume(1.0)
-        player.playbackStateChanged.connect(lambda state, p=player: self._cleanup_pad(p, state))
-        player.setSource(QUrl.fromLocalFile(filename))
-        self._pad_players.append(player)
-        player.play()
-
-    def _cleanup_pad(self, player: QMediaPlayer, state: QMediaPlayer.PlaybackState) -> None:
-        if state == QMediaPlayer.PlaybackState.StoppedState and player in self._pad_players:
-            self._pad_players.remove(player)
-            player.deleteLater()
+        if not pad.file or self.mixer is None:
+            return
+        try:
+            clip = self._clip(pad.file)
+        except Exception as exc:
+            QMessageBox.warning(self, "Cannot play pad", f"{pad.name}\n\n{exc}")
+            return
+        self.mixer.add(Voice(clip=clip, matrix=default_matrix(clip.channels, self.mixer.out_channels)))
 
     def _assign_pad(self, index: int) -> None:
         filename, _ = QFileDialog.getOpenFileName(self, "Assign pad", "", AUDIO_FILTER)
@@ -560,54 +597,46 @@ class MainWindow(QMainWindow):
         self.show_model.pads[index] = Pad()
         self.soundboard.set_pads(self.show_model.pads)
 
-    # --- Playback state and clock -------------------------------------
+    # --- Clock, follow cues and the playing row -----------------------
 
-    def _on_playback_state(self, state: QMediaPlayer.PlaybackState) -> None:
-        if state == QMediaPlayer.PlaybackState.StoppedState:
-            self._playing_cue = None
-        self._refresh_table()
+    def _tick(self) -> None:
+        self.wall_label.setText(datetime.now().strftime("%H:%M:%S"))
+        cues = self.show_model.cues
+
+        # Follow: when a cue reaches its natural end, start the next cue if it is set to follow.
+        for voice in list(self._cue_voices):
+            if voice.natural_end and not voice.followed:
+                voice.followed = True
+                row = self._row_of(voice.tag)
+                if row >= 0 and voice.tag.then == "follow" and row + 1 < len(cues):
+                    self.go_row(row + 1, replace=False)
+
+        self._cue_voices = [v for v in self._cue_voices if not v.done]
+        active = self._cue_voices[-1].tag if self._cue_voices else None
+        if active is not self._playing_cue:
+            self._playing_cue = active
+            self._refresh_table()
+        self._update_clock()
 
     def _update_clock(self) -> None:
-        self.wall_label.setText(datetime.now().strftime("%H:%M:%S"))
-        row = self._playing_row()
-        if row < 0:
+        voice = next((v for v in reversed(self._cue_voices) if v.tag is self._playing_cue and not v.done), None)
+        row = self._row_of(self._playing_cue)
+        if voice is None or self.mixer is None:
             self.track_label.setText(format_clock(0))
             self.remaining_label.setText(format_clock(0))
             return
 
-        position = self.player.position()
-        duration = self.player.duration() or self.show_model.cues[row].duration_ms
-        remaining = max(0, duration - position) if duration > 0 else 0
-        self.track_label.setText(format_clock(position))
-        self.remaining_label.setText(format_clock(remaining))
-        if row < len(self._row_bars) and duration > 0:
-            self._row_bars[row].setValue(min(100, position * 100 // duration))
+        rate = self.mixer.rate
+        position_ms = voice.position * 1000 // rate
+        duration_ms = voice.clip.frames * 1000 // rate
+        remaining_ms = max(0, duration_ms - position_ms)
+        self.track_label.setText(format_clock(position_ms))
+        self.remaining_label.setText(format_clock(remaining_ms))
+        if 0 <= row < len(self._row_bars) and duration_ms > 0:
+            self._row_bars[row].setValue(min(100, position_ms * 100 // duration_ms))
         item = self.table.item(row, REMAINING_COL)
         if item is not None:
-            item.setText(format_clock(remaining))
-
-    # --- Fade engine --------------------------------------------------
-
-    def _start_fade(self, start: float, end: float, seconds: float, on_done=None) -> None:
-        self.fade_timer.stop()
-        self._fade_queue = fade_volumes(start, end, seconds, FADE_TICK_MS)
-        self._fade_done = on_done
-        self.audio_output.setVolume(start)
-        self.fade_timer.start()
-
-    def _stop_fade_timer(self) -> None:
-        self.fade_timer.stop()
-        self._fade_queue = []
-        self._fade_done = None
-
-    def _fade_tick(self) -> None:
-        if not self._fade_queue:
-            self.fade_timer.stop()
-            done, self._fade_done = self._fade_done, None
-            if done is not None:
-                done()
-            return
-        self.audio_output.setVolume(self._fade_queue.pop(0))
+            item.setText(format_clock(remaining_ms))
 
     # --- Help and updates ---------------------------------------------
 
