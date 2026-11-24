@@ -48,6 +48,7 @@ from cuerunner.engine import Clip, LiveVoice, Mixer, Voice, default_matrix, load
 from cuerunner.model import Cue, Pad, RadioSettings, Show
 from cuerunner.playlist import Playlist, scan_audio
 from cuerunner.recorder import MAX_TRACKS, Recorder
+from cuerunner.remote import RemoteServer, RemoteState, lan_ip
 from cuerunner.soundboard import Soundboard
 from cuerunner.theme import apply_dark_theme
 from cuerunner.timecode import format_clock, format_duration, format_hms
@@ -163,6 +164,8 @@ class MainWindow(QMainWindow):
         self._recorder_input = None
         self._record_device = None
         self._record_tracks = MAX_TRACKS
+        self._remote: RemoteServer | None = None
+        self._remote_state: RemoteState | None = None
 
         self._build_toolbar()
         self._build_menus()
@@ -265,6 +268,9 @@ class MainWindow(QMainWindow):
         audio_menu.addAction("Record Start", self.start_recording)
         audio_menu.addAction("Record Stop", self.stop_recording)
         audio_menu.addAction("Record Input Settings...", self.choose_record_input)
+        audio_menu.addSeparator()
+        audio_menu.addAction("Start Phone Remote...", self.start_remote)
+        audio_menu.addAction("Stop Phone Remote", self.stop_remote)
         audio_menu.addSeparator()
         audio_menu.addAction("Start Venue Radio", self.start_radio)
         audio_menu.addAction("Stop Venue Radio", self.stop_radio)
@@ -648,6 +654,7 @@ class MainWindow(QMainWindow):
         self._radio_tick()
         if self._recorder is not None:
             self._recorder.drain()
+        self._remote_tick()
         if self._mic_chain is not None and self.mixer is not None:
             self.mixer.set_ducked(self._mic_chain.gate_open, self.duck_level)
         self._update_clock()
@@ -671,6 +678,60 @@ class MainWindow(QMainWindow):
         item = self.table.item(row, REMAINING_COL)
         if item is not None:
             item.setText(format_clock(remaining_ms))
+
+    # --- Phone remote -------------------------------------------------
+
+    def start_remote(self) -> None:
+        if self._remote is not None:
+            QMessageBox.information(self, "Phone remote", f"Already running at http://{lan_ip()}:{self._remote.port}")
+            return
+        pin, ok = QInputDialog.getText(self, "Phone remote", "Choose a PIN for the remote (4 or more digits):")
+        if not ok or len(pin.strip()) < 4:
+            if ok:
+                QMessageBox.warning(self, "Phone remote", "The PIN needs at least 4 characters.")
+            return
+        try:
+            state = RemoteState(pin.strip())
+            server = RemoteServer(state, port=8080)
+            server.start()
+        except OSError as exc:
+            QMessageBox.critical(self, "Phone remote", f"Could not start the remote on port 8080:\n{exc}")
+            return
+        self._remote = server
+        self._remote_state = state
+        QMessageBox.information(
+            self,
+            "Phone remote",
+            f"Open this on your phone or tablet, on the same Wi-Fi:\n\nhttp://{lan_ip()}:{server.port}\n\n"
+            "Your computer's firewall may ask to allow access the first time.",
+        )
+
+    def stop_remote(self) -> None:
+        if self._remote is not None:
+            self._remote.stop()
+        self._remote = None
+        self._remote_state = None
+
+    def _remote_tick(self) -> None:
+        if self._remote_state is None:
+            return
+        state = self._remote_state
+        while not state.commands.empty():
+            command = state.commands.get_nowait()
+            if command == "go":
+                self.go()
+            elif command == "stop":
+                self.stop()
+            elif command == "pause":
+                self.toggle_pause()
+            elif command == "panic":
+                self.panic()
+        state.status = {
+            "now": self._playing_cue.name if self._playing_cue is not None else "Standby",
+            "track": self.track_label.text(),
+            "remaining": self.remaining_label.text(),
+            "paused": bool(self.mixer and self.mixer.paused),
+        }
 
     # --- Multitrack recording -----------------------------------------
 
