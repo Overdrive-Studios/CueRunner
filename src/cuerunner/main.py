@@ -47,6 +47,9 @@ from cuerunner.dsp import MicChain
 from cuerunner.engine import Clip, LiveVoice, Mixer, Voice, default_matrix, load_clip, probe_duration_ms
 from cuerunner.model import Cue, Pad, RadioSettings, Show
 from cuerunner.playlist import Playlist, scan_audio
+import queue
+
+from cuerunner.midi import MidiInput
 from cuerunner.recorder import MAX_TRACKS, Recorder
 from cuerunner.remote import RemoteServer, RemoteState, lan_ip
 from cuerunner.soundboard import Soundboard
@@ -166,6 +169,8 @@ class MainWindow(QMainWindow):
         self._record_tracks = MAX_TRACKS
         self._remote: RemoteServer | None = None
         self._remote_state: RemoteState | None = None
+        self._midi: MidiInput | None = None
+        self._midi_commands: queue.Queue[str] = queue.Queue()
 
         self._build_toolbar()
         self._build_menus()
@@ -271,6 +276,9 @@ class MainWindow(QMainWindow):
         audio_menu.addSeparator()
         audio_menu.addAction("Start Phone Remote...", self.start_remote)
         audio_menu.addAction("Stop Phone Remote", self.stop_remote)
+        audio_menu.addSeparator()
+        audio_menu.addAction("Start MIDI Input...", self.start_midi)
+        audio_menu.addAction("Stop MIDI Input", self.stop_midi)
         audio_menu.addSeparator()
         audio_menu.addAction("Start Venue Radio", self.start_radio)
         audio_menu.addAction("Stop Venue Radio", self.stop_radio)
@@ -655,6 +663,8 @@ class MainWindow(QMainWindow):
         if self._recorder is not None:
             self._recorder.drain()
         self._remote_tick()
+        while not self._midi_commands.empty():
+            self._run_command(self._midi_commands.get_nowait())
         if self._mic_chain is not None and self.mixer is not None:
             self.mixer.set_ducked(self._mic_chain.gate_open, self.duck_level)
         self._update_clock()
@@ -717,21 +727,57 @@ class MainWindow(QMainWindow):
             return
         state = self._remote_state
         while not state.commands.empty():
-            command = state.commands.get_nowait()
-            if command == "go":
-                self.go()
-            elif command == "stop":
-                self.stop()
-            elif command == "pause":
-                self.toggle_pause()
-            elif command == "panic":
-                self.panic()
+            self._run_command(state.commands.get_nowait())
         state.status = {
             "now": self._playing_cue.name if self._playing_cue is not None else "Standby",
             "track": self.track_label.text(),
             "remaining": self.remaining_label.text(),
             "paused": bool(self.mixer and self.mixer.paused),
         }
+
+    # --- MIDI ---------------------------------------------------------
+
+    def start_midi(self) -> None:
+        if self._midi is not None:
+            QMessageBox.information(self, "MIDI", "MIDI input is already running.")
+            return
+        try:
+            from cuerunner import midi
+
+            ports = midi.input_port_names()
+        except Exception as exc:
+            QMessageBox.critical(self, "MIDI", f"Could not list MIDI inputs:\n{exc}")
+            return
+        if not ports:
+            QMessageBox.information(self, "MIDI", "No MIDI input ports were found.")
+            return
+        name, ok = QInputDialog.getItem(self, "MIDI input", "Choose the MIDI port:", ports, 0, False)
+        if not ok:
+            return
+        try:
+            self._midi = MidiInput(name, self._midi_commands.put)
+        except Exception as exc:
+            QMessageBox.critical(self, "MIDI", f"Could not open that MIDI port:\n{exc}")
+
+    def stop_midi(self) -> None:
+        if self._midi is not None:
+            self._midi.close()
+        self._midi = None
+
+    def _run_command(self, command: str) -> None:
+        """Run a command from the remote, MIDI, or anywhere else. Always called on the UI thread."""
+        if command == "go":
+            self.go()
+        elif command == "stop":
+            self.stop()
+        elif command == "pause":
+            self.toggle_pause()
+        elif command == "panic":
+            self.panic()
+        elif command.startswith("cue:"):
+            self.go_row(int(command.split(":", 1)[1]))
+        elif command.startswith("pad:"):
+            self._on_pad_pressed(int(command.split(":", 1)[1]))
 
     # --- Multitrack recording -----------------------------------------
 
