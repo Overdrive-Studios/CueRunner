@@ -44,7 +44,8 @@ from PySide6.QtWidgets import (
 from cuerunner import updater
 from cuerunner.countdown import Countdown
 from cuerunner.engine import Clip, Mixer, Voice, default_matrix, load_clip, probe_duration_ms
-from cuerunner.model import Cue, Pad, Show
+from cuerunner.model import Cue, Pad, RadioSettings, Show
+from cuerunner.playlist import Playlist, scan_audio
 from cuerunner.soundboard import Soundboard
 from cuerunner.theme import apply_dark_theme
 from cuerunner.timecode import format_clock, format_duration, format_hms
@@ -149,6 +150,8 @@ class MainWindow(QMainWindow):
         self.mixer: Mixer | None = None
         self.output = None
         self._update_worker = None
+        self._radio: Playlist | None = None
+        self._radio_voice: Voice | None = None
 
         self._build_toolbar()
         self._build_menus()
@@ -243,6 +246,10 @@ class MainWindow(QMainWindow):
     def _build_menus(self) -> None:
         audio_menu = self.menuBar().addMenu("Audio")
         audio_menu.addAction("Output Device...", self.choose_output)
+        audio_menu.addSeparator()
+        audio_menu.addAction("Start Venue Radio", self.start_radio)
+        audio_menu.addAction("Stop Venue Radio", self.stop_radio)
+        audio_menu.addAction("Venue Radio Settings...", self.radio_settings)
         help_menu = self.menuBar().addMenu("Help")
         help_menu.addAction("Check for Updates...", self.check_for_updates)
         help_menu.addAction(f"About CueRunner {__version__}", self.about)
@@ -570,6 +577,8 @@ class MainWindow(QMainWindow):
             self.mixer.paused = False
         self._cue_voices = []
         self._playing_cue = None
+        self._radio = None
+        self._radio_voice = None
         self.pause_button.setText("PAUSE")
         self._refresh_table()
 
@@ -616,6 +625,7 @@ class MainWindow(QMainWindow):
         if active is not self._playing_cue:
             self._playing_cue = active
             self._refresh_table()
+        self._radio_tick()
         self._update_clock()
 
     def _update_clock(self) -> None:
@@ -637,6 +647,58 @@ class MainWindow(QMainWindow):
         item = self.table.item(row, REMAINING_COL)
         if item is not None:
             item.setText(format_clock(remaining_ms))
+
+    # --- Venue radio --------------------------------------------------
+
+    def radio_settings(self) -> None:
+        settings = self.show_model.radio
+        music = QFileDialog.getExistingDirectory(self, "Music folder", settings.music_folder)
+        if music:
+            settings.music_folder = music
+        idents = QFileDialog.getExistingDirectory(self, "Ident and promo folder (optional)", settings.ident_folder)
+        if idents:
+            settings.ident_folder = idents
+        every, ok = QInputDialog.getInt(
+            self, "Ident interval", "Play an ident after this many tracks:", settings.ident_every, 1, 999
+        )
+        if ok:
+            settings.ident_every = every
+
+    def start_radio(self) -> None:
+        if self.mixer is None:
+            QMessageBox.warning(self, "Venue Radio", "No audio output is open.")
+            return
+        settings: RadioSettings = self.show_model.radio
+        tracks = scan_audio(settings.music_folder)
+        try:
+            self._radio = Playlist(tracks, scan_audio(settings.ident_folder), every=settings.ident_every)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Venue Radio", f"{exc}\n\nChoose a music folder in Venue Radio Settings.")
+            return
+        self._radio_voice = None
+
+    def stop_radio(self) -> None:
+        self._radio = None
+        if self._radio_voice is not None and self.mixer is not None:
+            self.mixer.fade_out(self._radio_voice, 1.0)
+        self._radio_voice = None
+
+    def _radio_tick(self) -> None:
+        """Keep the radio going: when a track or ident ends, start the next one straight away."""
+        if self._radio is None or self.mixer is None:
+            return
+        if self._radio_voice is not None and not self._radio_voice.done:
+            return
+        kind, path = self._radio.next()
+        try:
+            clip = self._clip(path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Venue Radio", f"Could not play {Path(path).name}:\n{exc}")
+            self.stop_radio()
+            return
+        voice = Voice(clip=clip, matrix=default_matrix(clip.channels, self.mixer.out_channels), bed=True, tag=kind)
+        self.mixer.add(voice)
+        self._radio_voice = voice
 
     # --- Help and updates ---------------------------------------------
 

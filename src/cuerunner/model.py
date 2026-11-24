@@ -1,4 +1,4 @@
-"""Show data model: cues, soundboard pads, and show files saved as JSON."""
+"""Show data model: cues, soundboard pads, venue radio settings, and show files saved as JSON."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 BANK_SIZE = 16
 BANK_COUNT = 4
 PAD_COUNT = BANK_SIZE * BANK_COUNT
@@ -23,13 +23,20 @@ class Cue:
     hotkey: str = ""
     duration_ms: int = 0  # filled in from the audio file when it is first probed
     loop: bool = False
-    then: str = "none"  # "none", or "follow" to start the next cue when this one ends
+    then: str = "none"  # "none", "follow" (start next when this ends), or "continue" (start next now)
 
 
 @dataclass
 class Pad:
     name: str = ""
     file: str = ""
+
+
+@dataclass
+class RadioSettings:
+    music_folder: str = ""
+    ident_folder: str = ""
+    ident_every: int = 4
 
 
 def _empty_pads() -> list[Pad]:
@@ -41,6 +48,7 @@ class Show:
     name: str = "Untitled Show"
     cues: list[Cue] = field(default_factory=list)
     pads: list[Pad] = field(default_factory=_empty_pads)
+    radio: RadioSettings = field(default_factory=RadioSettings)
 
     def next_number(self) -> str:
         numbers = []
@@ -57,6 +65,7 @@ class Show:
             "name": self.name,
             "cues": [asdict(c) for c in self.cues],
             "pads": [asdict(p) for p in self.pads],
+            "radio": asdict(self.radio),
         }
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -65,7 +74,9 @@ class Show:
         data = json.loads(path.read_text(encoding="utf-8"))
         cue_fields = set(Cue.__dataclass_fields__)
         pad_fields = set(Pad.__dataclass_fields__)
+        radio_fields = set(RadioSettings.__dataclass_fields__)
         cues = [Cue(**{k: v for k, v in c.items() if k in cue_fields}) for c in data.get("cues", [])]
         pads = [Pad(**{k: v for k, v in p.items() if k in pad_fields}) for p in data.get("pads", [])]
         pads = (pads + _empty_pads())[:PAD_COUNT]
-        return cls(name=data.get("name", "Untitled Show"), cues=cues, pads=pads)
+        radio = RadioSettings(**{k: v for k, v in data.get("radio", {}).items() if k in radio_fields})
+        return cls(name=data.get("name", "Untitled Show"), cues=cues, pads=pads, radio=radio)
