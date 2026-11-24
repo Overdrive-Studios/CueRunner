@@ -31,3 +31,28 @@ def test_default_go_note_maps_to_go() -> None:
 def test_unmapped_or_missing_key_gives_no_command() -> None:
     assert command_for(DEFAULT_MAP, "note:99") is None
     assert command_for(DEFAULT_MAP, None) is None
+
+
+def test_valid_keys_and_commands() -> None:
+    from cuerunner.midi import valid_command, valid_key
+
+    assert valid_key("note:36") and valid_key("cc:127")
+    assert not valid_key("note:128") and not valid_key("pad:3")
+    assert valid_command("go") and valid_command("cue:12") and valid_command("pad:63")
+    assert not valid_command("pad:64") and not valid_command("explode")
+
+
+def test_mapping_from_rows_reports_problems() -> None:
+    from cuerunner.midi import mapping_from_rows
+
+    mapping, problems = mapping_from_rows([("note:60", "cue:3"), ("", ""), ("bad", "go"), ("cc:7", "nope")])
+    assert mapping == {"note:60": "cue:3"}
+    assert len(problems) == 2
+
+
+def test_mapping_from_rows_rejects_duplicate_keys() -> None:
+    from cuerunner.midi import mapping_from_rows
+
+    mapping, problems = mapping_from_rows([("note:36", "go"), ("note:36", "stop")])
+    assert mapping == {"note:36": "go"}
+    assert problems

@@ -144,6 +144,65 @@ class CueDialog(QDialog):
         cue.hotkey = self.hotkey_edit.keySequence().toString()
 
 
+class MidiMappingDialog(QDialog):
+    """Table of MIDI keys and the commands they run. Validation happens in midi.mapping_from_rows."""
+
+    def __init__(self, mapping: dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("MIDI Mapping")
+        self.resize(420, 360)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Key: note:<number> or cc:<number>. Command: go, stop, pause, panic, cue:<number> or pad:<number>."))
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["MIDI key", "Command"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        for key, command in sorted(mapping.items()):
+            self._add_row(key, command)
+        layout.addWidget(self.table)
+        buttons = QHBoxLayout()
+        add = QPushButton("Add")
+        add.clicked.connect(lambda: self._add_row("", ""))
+        remove = QPushButton("Remove")
+        remove.clicked.connect(self._remove_selected)
+        buttons.addWidget(add)
+        buttons.addWidget(remove)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        box.accepted.connect(self._try_accept)
+        box.rejected.connect(self.reject)
+        layout.addWidget(box)
+        self._map: dict[str, str] = {}
+
+    def _add_row(self, key: str, command: str) -> None:
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setItem(row, 0, QTableWidgetItem(key))
+        self.table.setItem(row, 1, QTableWidgetItem(command))
+
+    def _remove_selected(self) -> None:
+        for index in sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True):
+            self.table.removeRow(index)
+
+    def _try_accept(self) -> None:
+        from cuerunner.midi import mapping_from_rows
+
+        rows = []
+        for row in range(self.table.rowCount()):
+            key_item = self.table.item(row, 0)
+            command_item = self.table.item(row, 1)
+            rows.append((key_item.text() if key_item else "", command_item.text() if command_item else ""))
+        mapping, problems = mapping_from_rows(rows)
+        if problems:
+            QMessageBox.warning(self, "MIDI Mapping", "\n".join(problems))
+            return
+        self._map = mapping
+        self.accept()
+
+    def result_map(self) -> dict[str, str]:
+        return dict(self._map)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -163,7 +222,6 @@ class MainWindow(QMainWindow):
         self._mic_chain: MicChain | None = None
         self._mic_voice: LiveVoice | None = None
         self._mic_device = None
-        self.duck_level = 0.3
         self._recorder: Recorder | None = None
         self._recorder_input = None
         self._record_device = None
@@ -280,6 +338,8 @@ class MainWindow(QMainWindow):
         audio_menu.addSeparator()
         audio_menu.addAction("Start MIDI Input...", self.start_midi)
         audio_menu.addAction("Stop MIDI Input", self.stop_midi)
+        audio_menu.addAction("MIDI Mapping...", self.edit_midi_mapping)
+        audio_menu.addAction("Duck Level...", self.choose_duck_level)
         audio_menu.addSeparator()
         audio_menu.addAction("Start Venue Radio", self.start_radio)
         audio_menu.addAction("Stop Venue Radio", self.stop_radio)
@@ -667,7 +727,7 @@ class MainWindow(QMainWindow):
         while not self._midi_commands.empty():
             self._run_command(self._midi_commands.get_nowait())
         if self._mic_chain is not None and self.mixer is not None:
-            self.mixer.set_ducked(self._mic_chain.gate_open, self.duck_level)
+            self.mixer.set_ducked(self._mic_chain.gate_open, self.show_model.duck_level)
         self._update_clock()
 
     def _update_clock(self) -> None:
@@ -756,9 +816,29 @@ class MainWindow(QMainWindow):
         if not ok:
             return
         try:
-            self._midi = MidiInput(name, self._midi_commands.put)
+            self._midi = MidiInput(name, self._midi_commands.put, mapping=self.show_model.midi_map)
         except Exception as exc:
             QMessageBox.critical(self, "MIDI", f"Could not open that MIDI port:\n{exc}")
+
+    def edit_midi_mapping(self) -> None:
+        dialog = MidiMappingDialog(self.show_model.midi_map, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.show_model.midi_map = dialog.result_map()
+        if self._midi is not None:
+            self._midi.set_mapping(self.show_model.midi_map)
+
+    def choose_duck_level(self) -> None:
+        percent, ok = QInputDialog.getInt(
+            self,
+            "Duck level",
+            "Music level while the talkback mic is open (percent of full level):",
+            round(self.show_model.duck_level * 100),
+            0,
+            100,
+        )
+        if ok:
+            self.show_model.duck_level = percent / 100
 
     def stop_midi(self) -> None:
         if self._midi is not None:

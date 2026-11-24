@@ -31,3 +31,24 @@ def test_next_number_follows_highest_cue() -> None:
 
 def test_next_number_empty_show() -> None:
     assert Show().next_number() == "1"
+
+
+def test_midi_map_and_duck_level_round_trip(tmp_path: Path) -> None:
+    from cuerunner.model import Show
+
+    show = Show(midi_map={"note:60": "cue:3"}, duck_level=0.5)
+    path = tmp_path / "show.json"
+    show.save(path)
+    loaded = Show.load(path)
+    assert loaded.midi_map == {"note:60": "cue:3"}
+    assert loaded.duck_level == 0.5
+
+
+def test_old_show_gets_default_midi_map_and_duck_level(tmp_path: Path) -> None:
+    from cuerunner.model import DEFAULT_MIDI_MAP, DEFAULT_DUCK_LEVEL, Show
+
+    path = tmp_path / "old.json"
+    path.write_text('{"format_version": 3, "name": "Old", "cues": []}', encoding="utf-8")
+    loaded = Show.load(path)
+    assert loaded.midi_map == DEFAULT_MIDI_MAP
+    assert loaded.duck_level == DEFAULT_DUCK_LEVEL

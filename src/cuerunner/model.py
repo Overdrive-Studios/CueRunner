@@ -11,6 +11,15 @@ BANK_SIZE = 16
 BANK_COUNT = 4
 PAD_COUNT = BANK_SIZE * BANK_COUNT
 
+# MIDI key to command. Keys are "note:<n>" or "cc:<n>"; commands are described in midi.py.
+DEFAULT_MIDI_MAP = {
+    "note:36": "go",
+    "note:37": "stop",
+    "note:38": "pause",
+    "note:39": "panic",
+}
+DEFAULT_DUCK_LEVEL = 0.3
+
 
 @dataclass
 class Cue:
@@ -49,6 +58,8 @@ class Show:
     cues: list[Cue] = field(default_factory=list)
     pads: list[Pad] = field(default_factory=_empty_pads)
     radio: RadioSettings = field(default_factory=RadioSettings)
+    midi_map: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MIDI_MAP))
+    duck_level: float = DEFAULT_DUCK_LEVEL  # music level while the talkback mic is open, 0 to 1
 
     def next_number(self) -> str:
         numbers = []
@@ -66,6 +77,8 @@ class Show:
             "cues": [asdict(c) for c in self.cues],
             "pads": [asdict(p) for p in self.pads],
             "radio": asdict(self.radio),
+            "midi_map": dict(self.midi_map),
+            "duck_level": self.duck_level,
         }
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -79,4 +92,13 @@ class Show:
         pads = [Pad(**{k: v for k, v in p.items() if k in pad_fields}) for p in data.get("pads", [])]
         pads = (pads + _empty_pads())[:PAD_COUNT]
         radio = RadioSettings(**{k: v for k, v in data.get("radio", {}).items() if k in radio_fields})
-        return cls(name=data.get("name", "Untitled Show"), cues=cues, pads=pads, radio=radio)
+        midi_map = data.get("midi_map", DEFAULT_MIDI_MAP)
+        duck_level = min(1.0, max(0.0, float(data.get("duck_level", DEFAULT_DUCK_LEVEL))))
+        return cls(
+            name=data.get("name", "Untitled Show"),
+            cues=cues,
+            pads=pads,
+            radio=radio,
+            midi_map=dict(midi_map),
+            duck_level=duck_level,
+        )
