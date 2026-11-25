@@ -101,3 +101,46 @@ def test_an_infinite_loop_ignores_the_play_count():
     voice = Voice(clip=clip, matrix=default_matrix(1, 2), loop=True, plays=1)
     voice.read(2000)
     assert not voice.should_end()
+
+
+def test_a_high_pass_filter_removes_bass_and_keeps_treble():
+    from cuerunner.fx import Band
+
+    bands = [Band("highpass", 500.0)]
+    low = rms(EqChain(bands=bands, rate=RATE, channels=1).process(tone(60)))
+    high = rms(EqChain(bands=bands, rate=RATE, channels=1).process(tone(5000)))
+    assert low / rms(tone(60)) < 0.1          # bass is gone
+    assert high / rms(tone(5000)) == pytest.approx(1.0, rel=0.1)
+
+
+def test_a_low_pass_filter_removes_treble_and_keeps_bass():
+    from cuerunner.fx import Band
+
+    bands = [Band("lowpass", 1000.0)]
+    high = rms(EqChain(bands=bands, rate=RATE, channels=1).process(tone(10000)))
+    low = rms(EqChain(bands=bands, rate=RATE, channels=1).process(tone(100)))
+    assert high / rms(tone(10000)) < 0.1
+    assert low / rms(tone(100)) == pytest.approx(1.0, rel=0.1)
+
+
+def test_a_filter_is_never_treated_as_flat():
+    from cuerunner.fx import Band
+
+    assert not Band("highpass", 80.0).flat()   # a filter works whatever its gain says
+    assert Band("peaking", 1000.0).flat()
+
+
+def test_an_effect_list_becomes_a_working_chain():
+    from cuerunner.fx import bands_from, new_effect
+
+    effects = [new_effect("highpass"), dict(new_effect("peaking"), gain_db=6.0)]
+    bands = bands_from(effects)
+    assert [b.kind for b in bands] == ["highpass", "peaking"]
+    assert not EqChain(bands=bands, rate=RATE, channels=1).flat()
+
+
+def test_rubbish_in_the_effect_list_is_ignored():
+    from cuerunner.fx import bands_from
+
+    assert bands_from([{"kind": "not a real effect"}, {}]) == []
+    assert bands_from(None) == []

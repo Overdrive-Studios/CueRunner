@@ -148,20 +148,83 @@ def test_a_trimmed_voice_stops_at_its_trim_out():
     assert voice.should_end()
 
 
-def test_the_audio_fx_tab_only_builds_an_eq_when_a_band_is_moved(window):
+def test_a_cue_with_no_effects_costs_nothing_at_playback(window):
     from cuerunner.model import Cue
 
     select(window, Cue(number="1", name="Song", kind="audio"))
-    cue = window.show_model.cues[0]
     voice, clip = a_voice()
-    window._apply_levels(voice, cue, clip)
-    assert voice.fx is None  # flat bands cost nothing at playback
+    window._apply_levels(voice, window.show_model.cues[0], clip)
+    assert voice.fx is None
 
-    window.insp_eq_low.setValue(6.0)
-    assert cue.eq_low == 6.0
+
+def test_adding_an_effect_puts_it_in_the_chain(window):
+    from cuerunner.model import Cue
+
+    select(window, Cue(number="1", name="Song", kind="audio"))
+    window._add_effect("highpass")
+    cue = window.show_model.cues[0]
+    assert [e["kind"] for e in cue.effects] == ["highpass"]
+    assert window.insp_fx_list.count() == 1
     voice, clip = a_voice()
     window._apply_levels(voice, cue, clip)
     assert voice.fx is not None and not voice.fx.flat()
+
+
+def test_removing_an_effect_takes_it_out_of_the_chain(window):
+    from cuerunner.model import Cue
+
+    select(window, Cue(number="1", name="Song", kind="audio"))
+    window._add_effect("peaking")
+    window._add_effect("lowpass")
+    window.insp_fx_list.setCurrentRow(0)
+    window._remove_effect()
+    assert [e["kind"] for e in window.show_model.cues[0].effects] == ["lowpass"]
+
+
+def test_editing_the_selected_effect_writes_it_back(window):
+    from cuerunner.model import Cue
+
+    select(window, Cue(number="1", name="Song", kind="audio"))
+    window._add_effect("peaking")
+    window.insp_fx_freq.setValue(440)
+    window.insp_fx_gain.setValue(-5.0)
+    effect = window.show_model.cues[0].effects[0]
+    assert effect["freq"] == 440 and effect["gain_db"] == -5.0
+
+
+def test_gain_is_greyed_out_for_a_filter(window):
+    from cuerunner.model import Cue
+
+    select(window, Cue(number="1", name="Song", kind="audio"))
+    window._add_effect("highpass")
+    assert not window.insp_fx_gain.isEnabled()  # a filter cuts by frequency, not by gain
+
+
+def test_the_old_three_band_eq_is_carried_over(window):
+    """Cues saved by earlier versions keep the EQ they had."""
+    from cuerunner.model import Cue
+
+    select(window, Cue(number="1", name="Song", kind="audio", eq_low=6.0, eq_high=-3.0))
+    cue = window.show_model.cues[0]
+    voice, clip = a_voice()
+    window._apply_levels(voice, cue, clip)
+    assert [e["kind"] for e in cue.effects] == ["lowshelf", "highshelf"]
+    assert voice.fx is not None
+
+
+def test_rate_and_the_fade_curve_reach_the_voice(window):
+    from cuerunner.model import Cue
+
+    select(window, Cue(number="1", name="Song", kind="audio"))
+    window.insp_rate.setValue(1.5)
+    window.insp_integrated.setChecked(True)
+    window.insp_curve.setCurrentIndex(1)  # smooth
+    cue = window.show_model.cues[0]
+    assert cue.rate == 1.5 and cue.integrated_fade is True
+    voice, clip = a_voice()
+    window._apply_levels(voice, cue, clip)
+    assert voice.rate == 1.5
+    assert voice.curve == "smooth"
 
 
 def test_the_io_tab_shows_the_cues_routing(window):
@@ -276,3 +339,16 @@ def test_a_cue_with_no_audio_file_shows_no_waveform(window):
     open_time_tab(window)
     select(window, Cue(number="1", name="Note", kind="memo"))
     assert not window.insp_wave.has_waveform()
+
+
+def test_adding_and_clearing_slices(window, wav_file):
+    from cuerunner.model import Cue
+
+    open_time_tab(window)
+    select(window, Cue(number="1", name="Song", kind="audio", file=str(wav_file), duration_ms=4000))
+    window.insp_wave.set_markers(1.5, 0.0)
+    window._add_slice()
+    window._add_slice()  # the same point again changes nothing
+    assert window.show_model.cues[0].slices == [1.5]
+    window._clear_slices()
+    assert window.show_model.cues[0].slices == []

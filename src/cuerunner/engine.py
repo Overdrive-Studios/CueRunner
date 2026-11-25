@@ -142,12 +142,14 @@ class Voice:
     start: int = 0  # frames; where playback begins, and where a repeat goes back to
     end: int = 0  # frames; playback stops here (0 = the end of the clip). Set by a cue's end time.
     plays: int = 1  # how many times through; loop=True overrides this and plays forever
+    rate: float = 1.0  # playback speed; 2.0 is twice as fast. Pitch rises with it.
+    curve: str = "linear"  # fade shape: "linear", or "smooth" to ease in and out
     _plays_done: int = 0
     fx: Any = None  # an fx.EqChain applied to this voice, or None for no processing
     bed: bool = False  # bed voices are lowered while ducking is active
     gain: float = 1.0
     tag: Any = None  # for the UI, e.g. the Cue this voice is playing
-    position: int = 0
+    position: float = 0.0  # in frames; fractional once the rate is not 1.0
     env: float = 1.0
     done: bool = False
     natural_end: bool = False  # reached the end of the clip without being stopped
@@ -176,6 +178,8 @@ class Voice:
         if self._fade_complete or self._fade_total == 0:
             return np.full(n, self.env, dtype=np.float32)
         steps = np.minimum(np.arange(1, n + 1) + self._fade_done, self._fade_total) / self._fade_total
+        if self.curve == "smooth":
+            steps = steps * steps * (3.0 - 2.0 * steps)  # ease in and out
         env = self._fade_start + (self._fade_target - self._fade_start) * steps
         self._fade_done = min(self._fade_total, self._fade_done + n)
         self.env = float(env[-1])
@@ -194,21 +198,32 @@ class Voice:
         length = self._end_frame()
         if length == 0 or (not self.loop and self.position >= length):
             return None
-        index = self.position + np.arange(n)
+        step = max(float(self.rate), 0.01)
+        index = self.position + np.arange(n) * step
         if self.loop:
             start, end = self._loop_bounds(length)
             span = end - start
             index = np.where(index >= end, start + (index - start) % span, index)
-            nxt = self.position + n
+            nxt = self.position + n * step
             if nxt >= end:
                 nxt = start + (nxt - start) % span
             self.position = nxt
         else:
             index = index[index < length]
-            self.position += len(index)
+            self.position += len(index) * step
             if self.position >= length:
                 self.natural_end = True
-        return self.clip.data[index]
+        if step == 1.0:
+            return self.clip.data[index.astype(np.int64)]
+        return self._interpolate(index, length)
+
+    def _interpolate(self, index: np.ndarray, length: int) -> np.ndarray:
+        """Read between samples, so a changed rate does not sound grainy."""
+        base = np.floor(index).astype(np.int64)
+        nxt = np.minimum(base + 1, length - 1)
+        frac = (index - base).astype(np.float32)[:, None]
+        data = self.clip.data
+        return (data[base] * (1.0 - frac) + data[nxt] * frac).astype(np.float32)
 
     def _loop_bounds(self, length: int) -> tuple[int, int]:
         end = self.loop_end if 0 < self.loop_end <= length else length

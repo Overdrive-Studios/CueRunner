@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QKeySequenceEdit,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QMenu,
     QPlainTextEdit,
@@ -89,6 +90,7 @@ INSPECTOR_TABS = ["Basics", "Triggers", "I/O", "Time & Loops", "Levels", "Object
 MIDI_TRIGGER_KINDS = [("Note On", "note_on"), ("Note Off", "note_off"), ("Control Change", "control_change")]
 SECOND_TRIGGER_ACTIONS = [("does nothing", "nothing"), ("starts it again", "restart"),
                           ("stops it", "stop"), ("pauses it", "pause")]
+FADE_CURVES = [("Linear curve", "linear"), ("Smooth curve", "smooth")]
 CONTINUE_MODES = [("Do not continue", "none"), ("Auto-follow", "follow"), ("Auto-continue", "continue")]
 
 
@@ -1031,9 +1033,10 @@ class MainWindow(QMainWindow):
             self.insp_play_count.setValue(max(1, cue.play_count))
             self.insp_infinite.setChecked(cue.loop)
             self.insp_play_once.setChecked(not cue.loop)
-            self.insp_eq_low.setValue(cue.eq_low)
-            self.insp_eq_mid.setValue(cue.eq_mid)
-            self.insp_eq_high.setValue(cue.eq_high)
+            self.insp_rate.setValue(cue.rate or 1.0)
+            self.insp_integrated.setChecked(cue.integrated_fade)
+            self.insp_curve.setCurrentIndex(max(0, self.insp_curve.findData(cue.fade_curve)))
+            self._refresh_effects(cue)
             self._refresh_objects_tab(cue, editable)
             self._refresh_waveform(cue)
         finally:
@@ -1059,6 +1062,7 @@ class MainWindow(QMainWindow):
         seconds = cue.duration_ms / 1000 if cue.duration_ms else self._file_seconds(cue)
         self.insp_wave.set_clip(cue.file if cue.kind == "audio" else "", seconds)
         self.insp_wave.set_markers(cue.loop_in, cue.loop_out)
+        self.insp_wave.set_slices(cue.slices)
 
     def _file_seconds(self, cue: Cue) -> float:
         """A cue's length from the file header, for cues that have not been probed yet."""
@@ -1068,6 +1072,23 @@ class MainWindow(QMainWindow):
             return probe_duration_ms(cue.file) / 1000
         except Exception:
             return 0.0
+
+    def _add_slice(self) -> None:
+        """Mark a point in the file, at the loop in marker."""
+        cue = self._selected_cue()
+        if cue is None or not self._editing:
+            return
+        point = round(self.insp_wave.markers()[0], 3)
+        if point not in cue.slices:
+            cue.slices = sorted(cue.slices + [point])
+        self.insp_wave.set_slices(cue.slices)
+
+    def _clear_slices(self) -> None:
+        cue = self._selected_cue()
+        if cue is None or not self._editing:
+            return
+        cue.slices = []
+        self.insp_wave.set_slices(cue.slices)
 
     def _wave_markers_changed(self, loop_in: float, loop_out: float) -> None:
         """A marker was dragged: update the spin boxes, which write back to the cue."""
@@ -1108,6 +1129,58 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.show_model.audio_patches = dialog.result_patches()
             self._refresh_inspector()
+
+    def _refresh_effects(self, cue: Cue) -> None:
+        """Fill the effect list, keeping whichever effect was being edited selected."""
+        chosen = self.insp_fx_list.currentRow()
+        self.insp_fx_list.clear()
+        for effect in cue.effects:
+            self.insp_fx_list.addItem(f"{fx.effect_label(effect.get('kind', ''))}"
+                                      f"  {effect.get('freq', 0):.0f} Hz")
+        if cue.effects:
+            self.insp_fx_list.setCurrentRow(min(max(chosen, 0), len(cue.effects) - 1))
+        self._refresh_effect_fields()
+
+    def _refresh_effect_fields(self) -> None:
+        """Show the selected effect's settings; gain is meaningless for a filter."""
+        cue = self._selected_cue()
+        row = self.insp_fx_list.currentRow()
+        has = cue is not None and 0 <= row < len(cue.effects)
+        was_busy, self._insp_busy = self._insp_busy, True
+        try:
+            for spin in (self.insp_fx_freq, self.insp_fx_gain, self.insp_fx_q):
+                spin.setEnabled(has and self._editing)
+            if not has:
+                return
+            effect = cue.effects[row]
+            self.insp_fx_freq.setValue(float(effect.get("freq", 1000.0)))
+            self.insp_fx_gain.setValue(float(effect.get("gain_db", 0.0)))
+            self.insp_fx_q.setValue(float(effect.get("q", 0.707)))
+            if effect.get("kind") in fx.FILTER_KINDS:
+                self.insp_fx_gain.setEnabled(False)
+        finally:
+            self._insp_busy = was_busy
+
+    def _selected_cue(self) -> Cue | None:
+        row = self._selected_row()
+        cues = self.show_model.cues
+        return cues[row] if 0 <= row < len(cues) else None
+
+    def _add_effect(self, kind: str) -> None:
+        cue = self._selected_cue()
+        if cue is None or not self._editing:
+            return
+        cue.effects.append(fx.new_effect(kind))
+        self._refresh_effects(cue)
+        self.insp_fx_list.setCurrentRow(len(cue.effects) - 1)
+
+    def _remove_effect(self) -> None:
+        cue = self._selected_cue()
+        row = self.insp_fx_list.currentRow()
+        if cue is None or not self._editing or not 0 <= row < len(cue.effects):
+            return
+        cue.effects.pop(row)
+        self._refresh_effects(cue)
 
     def _refresh_objects_tab(self, cue: Cue, editable: bool) -> None:
         """The Objects tab only applies to cues that put something on a screen."""
@@ -1194,9 +1267,14 @@ class MainWindow(QMainWindow):
         cue.trim_out = self.insp_end_time.value()
         cue.trim_db = self.insp_trim.value()
         cue.play_count = self.insp_play_count.value()
-        cue.eq_low = self.insp_eq_low.value()
-        cue.eq_mid = self.insp_eq_mid.value()
-        cue.eq_high = self.insp_eq_high.value()
+        chosen = self.insp_fx_list.currentRow()
+        if 0 <= chosen < len(cue.effects):
+            cue.effects[chosen]["freq"] = self.insp_fx_freq.value()
+            cue.effects[chosen]["gain_db"] = self.insp_fx_gain.value()
+            cue.effects[chosen]["q"] = self.insp_fx_q.value()
+        cue.rate = self.insp_rate.value()
+        cue.integrated_fade = self.insp_integrated.isChecked()
+        cue.fade_curve = self.insp_curve.currentData() or "linear"
         if self.insp_display.isEnabled():
             cue.video_output = self.insp_display.currentData() or ""
         if self.insp_opacity.isEnabled():
@@ -1627,7 +1705,32 @@ class MainWindow(QMainWindow):
         ggrid.addWidget(QLabel("Loop out:"), 5, 0)
         ggrid.addWidget(self.insp_loop_out, 5, 1)
         ggrid.addWidget(self.insp_loop, 4, 2)
-        ggrid.addWidget(QLabel("Drag the yellow markers on the waveform to set the loop."), 5, 2)
+        self.insp_rate = QDoubleSpinBox()
+        self.insp_rate.setRange(0.25, 4.0)
+        self.insp_rate.setSingleStep(0.05)
+        self.insp_rate.setDecimals(2)
+        self.insp_rate.setMaximumWidth(90)
+        self.insp_preserve_pitch = QCheckBox("Preserve pitch")
+        self.insp_preserve_pitch.setEnabled(False)
+        self.insp_preserve_pitch.setToolTip("Not available yet: holding pitch while changing "
+                                            "rate needs time stretching.")
+        self.insp_integrated = QCheckBox("Integrated fade")
+        self.insp_curve = QComboBox()
+        for label, value in FADE_CURVES:
+            self.insp_curve.addItem(label, value)
+        self.insp_curve.setMaximumWidth(140)
+        rate_row = QHBoxLayout()
+        rate_row.addWidget(QLabel("Rate:"))
+        rate_row.addWidget(self.insp_rate)
+        rate_row.addWidget(self.insp_preserve_pitch)
+        rate_row.addWidget(self.insp_integrated)
+        rate_row.addWidget(self.insp_curve)
+        self.insp_add_slice = QPushButton("Add Slice")
+        self.insp_clear_slices = QPushButton("Delete All")
+        rate_row.addWidget(self.insp_add_slice)
+        rate_row.addWidget(self.insp_clear_slices)
+        rate_row.addStretch(1)
+        ggrid.addLayout(rate_row, 5, 2)
         ggrid.setColumnStretch(2, 1)
         ggrid.setRowStretch(6, 1)
         built_pages["Time & Loops"] = time_page
@@ -1745,21 +1848,43 @@ class MainWindow(QMainWindow):
         fx_page.setObjectName("inspectorPage")
         fgrid = QGridLayout(fx_page)
         fgrid.setContentsMargins(12, 10, 12, 10)
-        self.insp_eq_low = QDoubleSpinBox()
-        self.insp_eq_mid = QDoubleSpinBox()
-        self.insp_eq_high = QDoubleSpinBox()
-        bands = fx.default_bands()
-        captions = [f"Low ({bands[0].freq:.0f} Hz):", f"Mid ({bands[1].freq:.0f} Hz):",
-                    f"High ({bands[2].freq:.0f} Hz):"]
-        for row, (caption, spin) in enumerate(zip(captions, (self.insp_eq_low, self.insp_eq_mid,
-                                                             self.insp_eq_high))):
-            spin.setRange(-24.0, 24.0)
-            spin.setDecimals(1)
-            spin.setSuffix(" dB")
-            spin.setMaximumWidth(140)
-            fgrid.addWidget(QLabel(caption), row, 0)
-            fgrid.addWidget(spin, row, 1)
-        fgrid.addWidget(QLabel("0 dB leaves the band alone. Applies to audio cues as they play."), 3, 0, 1, 2)
+        self.insp_fx_list = QListWidget()
+        self.insp_fx_list.setMaximumWidth(200)
+        self.insp_fx_add = QPushButton("Add audio effect…")
+        self.insp_fx_remove = QPushButton("Remove")
+        self.insp_fx_freq = QDoubleSpinBox()
+        self.insp_fx_freq.setRange(20.0, 20000.0)
+        self.insp_fx_freq.setDecimals(0)
+        self.insp_fx_freq.setSuffix(" Hz")
+        self.insp_fx_gain = QDoubleSpinBox()
+        self.insp_fx_gain.setRange(-24.0, 24.0)
+        self.insp_fx_gain.setDecimals(1)
+        self.insp_fx_gain.setSuffix(" dB")
+        self.insp_fx_q = QDoubleSpinBox()
+        self.insp_fx_q.setRange(0.1, 10.0)
+        self.insp_fx_q.setDecimals(2)
+        for spin in (self.insp_fx_freq, self.insp_fx_gain, self.insp_fx_q):
+            spin.setMaximumWidth(130)
+        fx_menu = QMenu(self.insp_fx_add)
+        for label, kind, _ in fx.EFFECT_TYPES:
+            fx_menu.addAction(label, lambda k=kind: self._add_effect(k))
+        self.insp_fx_add.setMenu(fx_menu)
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.insp_fx_add)
+        buttons.addWidget(self.insp_fx_remove)
+        buttons.addStretch(1)
+        fgrid.addLayout(buttons, 0, 0, 1, 2)
+        fgrid.addWidget(self.insp_fx_list, 1, 0, 4, 1)
+        fgrid.addWidget(QLabel("Frequency:"), 1, 1)
+        fgrid.addWidget(self.insp_fx_freq, 1, 2)
+        fgrid.addWidget(QLabel("Gain:"), 2, 1)
+        fgrid.addWidget(self.insp_fx_gain, 2, 2)
+        fgrid.addWidget(QLabel("Q:"), 3, 1)
+        fgrid.addWidget(self.insp_fx_q, 3, 2)
+        fgrid.addWidget(QLabel("Each effect is applied to the audio before the cue's level."),
+                        5, 0, 1, 3)
+        fgrid.setColumnStretch(2, 1)
         fgrid.setRowStretch(4, 1)
         built_pages["Audio FX"] = fx_page
 
@@ -1794,13 +1919,17 @@ class MainWindow(QMainWindow):
             self.insp_wave,
             self.insp_fade_in, self.insp_fade_out, self.insp_start_time, self.insp_end_time,
             self.insp_trim, self.insp_play_once, self.insp_play_count, self.insp_infinite,
-            self.insp_display, self.insp_opacity, self.insp_eq_low, self.insp_eq_mid,
-            self.insp_eq_high,
+            self.insp_rate, self.insp_integrated, self.insp_curve, self.insp_add_slice,
+            self.insp_clear_slices,
+            self.insp_display, self.insp_opacity, self.insp_fx_list, self.insp_fx_add,
+            self.insp_fx_remove, self.insp_fx_freq, self.insp_fx_gain, self.insp_fx_q,
         ]
         self.insp_route_button.clicked.connect(self._inspector_routing)
         self.insp_view_map.clicked.connect(self._inspector_routing)
         self.insp_edit_patches.clicked.connect(self.edit_audio_patches)
         self.insp_levels.changed.connect(self._inspector_apply)
+        self.insp_fx_list.currentRowChanged.connect(lambda _: self._refresh_effect_fields())
+        self.insp_fx_remove.clicked.connect(self._remove_effect)
         self.insp_patch.currentIndexChanged.connect(self._inspector_apply)
         self.insp_set_default.clicked.connect(lambda: self.insp_levels.set_all(0))
         self.insp_set_silent.clicked.connect(lambda: self.insp_levels.set_all(levels_ui.MIN_DB))
@@ -1808,9 +1937,13 @@ class MainWindow(QMainWindow):
         self.insp_clear_solos.clicked.connect(self.insp_levels.clear_solos)
         for spin in (self.insp_fade_in, self.insp_fade_out, self.insp_start_time,
                      self.insp_end_time, self.insp_trim, self.insp_play_count,
-                     self.insp_eq_low, self.insp_eq_mid, self.insp_eq_high):
+                     self.insp_fx_freq, self.insp_fx_gain, self.insp_fx_q, self.insp_rate):
             spin.valueChanged.connect(self._inspector_apply)
         self.insp_play_once.toggled.connect(self._inspector_apply)
+        self.insp_add_slice.clicked.connect(self._add_slice)
+        self.insp_clear_slices.clicked.connect(self._clear_slices)
+        self.insp_integrated.toggled.connect(self._inspector_apply)
+        self.insp_curve.currentIndexChanged.connect(self._inspector_apply)
         self.insp_opacity.valueChanged.connect(self._inspector_apply)
         self.insp_display.currentIndexChanged.connect(self._inspector_apply)
         self.insp_wall_clock.editingFinished.connect(self._inspector_apply)
@@ -2419,10 +2552,15 @@ class MainWindow(QMainWindow):
         return round(cue.trim_in * rate), round(cue.trim_out * rate)
 
     def _cue_eq(self, cue: Cue, channels: int):
-        """The EQ chain for a cue, or None when all three bands are flat."""
-        bands = fx.default_bands()
-        for band, gain in zip(bands, (cue.eq_low, cue.eq_mid, cue.eq_high)):
-            band.gain_db = gain
+        """The effect chain for a cue, or None when nothing in it changes the sound."""
+        if not cue.effects and any((cue.eq_low, cue.eq_mid, cue.eq_high)):
+            # Carried over from the fixed three band EQ of earlier versions.
+            cue.effects = [dict(fx.new_effect(kind), gain_db=gain) for kind, gain in
+                           (("lowshelf", cue.eq_low), ("peaking", cue.eq_mid),
+                            ("highshelf", cue.eq_high)) if gain]
+        bands = fx.bands_from(cue.effects)
+        if not bands:
+            return None
         rate = self.mixer.rate if self.mixer is not None else 48000
         chain = fx.EqChain(bands=bands, rate=rate, channels=channels)
         return None if chain.flat() else chain
@@ -2435,6 +2573,8 @@ class MainWindow(QMainWindow):
         voice.position = voice.start
         voice.end = end
         voice.plays = max(1, cue.play_count)
+        voice.rate = cue.rate or 1.0
+        voice.curve = cue.fade_curve if cue.integrated_fade else "linear"
         voice.fx = self._cue_eq(cue, clip.channels)
         outs = voice.matrix.shape[1]
         voice.matrix = voice.matrix * output_gains(cue.output_levels, cue.output_mutes,

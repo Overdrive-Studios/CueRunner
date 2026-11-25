@@ -85,6 +85,7 @@ class WaveformView(QWidget):
         self._loop_out = 0.0
         self._message = "No audio file"
         self._dragging = ""  # "in", "out" or "" while nothing is being dragged
+        self._slices: list[float] = []
 
     def set_clip(self, path: str, duration_s: float) -> None:
         self._peaks = peaks(path) if path else np.zeros((0, 2), dtype=np.float32)
@@ -95,6 +96,10 @@ class WaveformView(QWidget):
             self._message = "No waveform for this file"
         else:
             self._message = ""
+        self.update()
+
+    def set_slices(self, slices: list) -> None:
+        self._slices = [float(x) for x in (slices or [])]
         self.update()
 
     def set_markers(self, loop_in: float, loop_out: float) -> None:
@@ -189,6 +194,10 @@ class WaveformView(QWidget):
 
         painter.setPen(QPen(QColor("#5a5a60"), 1))
         painter.drawLine(QPointF(0, middle), QPointF(width, middle))
+        for mark in self._slices:
+            painter.setPen(QPen(QColor("#c9d1d9"), 1, Qt.PenStyle.DashLine))
+            x = self._x_for(mark)
+            painter.drawLine(QPointF(x, self.RULER), QPointF(x, self.height()))
         for x in (start_x, end_x):
             painter.setPen(QPen(QColor("#f2c14e"), 2))
             painter.drawLine(QPointF(x, self.RULER), QPointF(x, self.height()))

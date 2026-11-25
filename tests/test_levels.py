@@ -68,3 +68,35 @@ def test_a_show_always_keeps_at_least_one_patch(tmp_path):
     path = tmp_path / "show.json"
     show.save(path)
     assert len(Show.load(path).audio_patches) == 1
+
+
+def test_a_faster_rate_gets_through_the_file_sooner():
+    """Rate on the Time & Loops tab: 2x consumes twice as much audio per block."""
+    from cuerunner.engine import Clip, Voice, default_matrix
+
+    clip = Clip(np.ones((1000, 1), dtype=np.float32))
+    normal = Voice(clip=clip, matrix=default_matrix(1, 2))
+    fast = Voice(clip=clip, matrix=default_matrix(1, 2), rate=2.0)
+    normal.read(100)
+    fast.read(100)
+    assert normal.position == 100
+    assert fast.position == pytest.approx(200)
+
+
+def test_a_rate_change_still_returns_the_block_size_asked_for():
+    from cuerunner.engine import Clip, Voice, default_matrix
+
+    clip = Clip(np.ones((4800, 2), dtype=np.float32))
+    voice = Voice(clip=clip, matrix=default_matrix(2, 2), rate=0.5)
+    block = voice.read(256)
+    assert block.shape == (256, 2)
+    assert np.allclose(block, 1.0)  # a steady signal stays steady between samples
+
+
+def test_a_slower_rate_reads_between_samples():
+    from cuerunner.engine import Clip, Voice, default_matrix
+
+    ramp = np.arange(100, dtype=np.float32)[:, None]
+    voice = Voice(clip=Clip(ramp), matrix=default_matrix(1, 2), rate=0.5)
+    block = voice.read(4)
+    assert block[1][0] == pytest.approx(0.5)  # halfway between sample 0 and 1
