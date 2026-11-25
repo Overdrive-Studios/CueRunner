@@ -95,3 +95,68 @@ class MidiInput:
 
     def close(self) -> None:
         self._port.close()
+
+
+# --- MIDI cues: send a message to a MIDI output port -----------------------------
+
+def output_port_names() -> list[str]:
+    import mido
+
+    return list(mido.get_output_names())
+
+
+def parse_out(text: str) -> dict:
+    """'note_on 60 127 2' -> a mido message spec. Channels run 1 to 16 and default to 1."""
+    parts = text.split()
+    if not parts:
+        raise ValueError("Enter a MIDI message, for example: note_on 60 127")
+    kind, args = parts[0].lower(), parts[1:]
+    numbers = []
+    for token in args:
+        if not token.isdigit():
+            raise ValueError(f"'{token}' is not a number.")
+        numbers.append(int(token))
+
+    def take(count: int, name: str) -> list[int]:
+        if len(numbers) < count:
+            raise ValueError(f"{kind} needs {count} numbers: {name}.")
+        return numbers[:count]
+
+    if kind == "note_on":
+        note, velocity = take(2, "note and velocity")
+        channel = numbers[2] if len(numbers) > 2 else 1
+        spec = {"type": "note_on", "note": note, "velocity": velocity}
+    elif kind == "note_off":
+        note = take(1, "note")[0]
+        channel = numbers[2] if len(numbers) > 2 else 1
+        spec = {"type": "note_off", "note": note, "velocity": numbers[1] if len(numbers) > 1 else 0}
+    elif kind in ("cc", "control"):
+        control, value = take(2, "control and value")
+        channel = numbers[2] if len(numbers) > 2 else 1
+        spec = {"type": "control_change", "control": control, "value": value}
+    elif kind == "program":
+        program = take(1, "program")[0]
+        channel = numbers[1] if len(numbers) > 1 else 1
+        spec = {"type": "program_change", "program": program}
+    else:
+        raise ValueError(f"'{kind}' is not a MIDI message. Use note_on, note_off, cc or program.")
+
+    for name, value, top in (("note", spec.get("note"), 127), ("velocity", spec.get("velocity"), 127),
+                             ("control", spec.get("control"), 127), ("value", spec.get("value"), 127),
+                             ("program", spec.get("program"), 127)):
+        if value is not None and not 0 <= value <= top:
+            raise ValueError(f"{name} {value} is outside 0 to {top}.")
+    if not 1 <= channel <= 16:
+        raise ValueError(f"MIDI channel {channel} is outside 1 to 16.")
+    spec["channel"] = channel - 1
+    return spec
+
+
+def send_out(port_name: str, text: str) -> None:
+    import mido
+
+    if not port_name:
+        raise ValueError("Choose a MIDI output port for this cue.")
+    spec = parse_out(text)
+    with mido.open_output(port_name) as port:
+        port.send(mido.Message(**spec))

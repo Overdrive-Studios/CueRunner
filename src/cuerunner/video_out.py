@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QObject, Qt, QUrl
 from PySide6.QtGui import QGuiApplication
+from PySide6.QtWidgets import QLabel
 from PySide6.QtMultimedia import QAudioOutput, QCamera, QMediaCaptureSession, QMediaDevices, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
@@ -109,8 +110,31 @@ class _Output:
         self.session = QMediaCaptureSession()
         self.session.setVideoOutput(self.widget)
         self.camera: QCamera | None = None
+        self.cue_number = ""
+        self.text_window: QLabel | None = None
         self.widget.setGeometry(screen.geometry())
         self.screen = screen
+
+    def show_text(self, text: str, size: int) -> None:
+        if self.text_window is None:
+            self.text_window = QLabel()
+            self.text_window.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+            self.text_window.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.text_window.setWordWrap(True)
+            self.text_window.setStyleSheet("background: black; color: white; padding: 40px;")
+        font = self.text_window.font()
+        font.setPointSize(max(8, size))
+        self.text_window.setFont(font)
+        self.text_window.setText(text)
+        self.text_window.setScreen(self.screen)
+        self.text_window.setGeometry(self.screen.geometry())
+        self.text_window.showFullScreen()
+        self.text_window.raise_()
+        self.widget.hide()
+
+    def hide_text(self) -> None:
+        if self.text_window is not None:
+            self.text_window.hide()
 
     def show_on_screen(self, fit: str) -> None:
         self.widget.setAspectRatioMode(
@@ -145,9 +169,11 @@ class VideoOutputs(QObject):
         out.show_on_screen(fit)
         return out
 
-    def play(self, output: str, path: str, routes: list[dict] | None = None) -> None:
+    def play(self, output: str, path: str, routes: list[dict] | None = None, number: str = "") -> None:
         out = self._output_for(output, routes or [])
         out.stop_camera()
+        out.hide_text()
+        out.cue_number = number
         out.player.setSource(QUrl.fromLocalFile(path))
         out.player.play()
 
@@ -157,6 +183,7 @@ class VideoOutputs(QObject):
             raise RuntimeError(f"The camera \"{camera_name}\" is not connected.")
         out = self._output_for(output, routes or [])
         out.player.stop()
+        out.hide_text()
         if out.camera is None:
             out.camera = QCamera(device)
         else:
@@ -164,15 +191,35 @@ class VideoOutputs(QObject):
         out.session.setCamera(out.camera)
         out.camera.start()
 
+    def volume(self, number: str) -> float | None:
+        """The audio level of the video playing for this cue number, or None if none is playing."""
+        for out in self._outputs.values():
+            if out.cue_number == number and out.player.playbackState() != QMediaPlayer.PlaybackState.StoppedState:
+                return out.audio.volume()
+        return None
+
+    def set_volume(self, number: str, volume: float) -> None:
+        for out in self._outputs.values():
+            if out.cue_number == number:
+                out.audio.setVolume(min(1.0, max(0.0, volume)))
+
+    def show_text(self, output: str, text: str, size: int, routes: list[dict] | None = None) -> None:
+        out = self._output_for(output, routes or [])
+        out.player.stop()
+        out.stop_camera()
+        out.show_text(text, size)
+
     def stop_all(self) -> None:
         for out in self._outputs.values():
             out.player.stop()
             out.stop_camera()
+            out.hide_text()
             out.widget.hide()
 
     def close(self) -> None:
         for out in self._outputs.values():
             out.player.stop()
             out.stop_camera()
+            out.hide_text()
             out.widget.close()
         self._outputs.clear()

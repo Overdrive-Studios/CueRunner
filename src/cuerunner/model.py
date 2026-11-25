@@ -28,7 +28,7 @@ DEFAULT_REMOTE_PORT = 8080
 class Cue:
     number: str
     name: str
-    kind: str = "audio"  # audio, video, camera, console, spotify, wait, memo
+    kind: str = "audio"  # audio, video, camera, text, fade, control, wait, group, memo, osc, midi, light, network, mic, console, spotify
     file: str = ""
     fade_in: float = 0.0  # seconds
     fade_out: float = 0.0
@@ -39,6 +39,19 @@ class Cue:
     route: list = field(default_factory=list)  # per clip channel, the 1-based outputs it goes to; empty = default
     video_output: str = ""  # video and camera cues: a display ("screen:1") or route ("route:Stage"); see video_out.py
     video_input: str = ""  # camera cues: the name of a video input patch
+    target: str = ""  # control and fade cues: the number of the cue they act on
+    action: str = "start"  # control cues: "start" or "stop"
+    level: float = 1.0  # fade cues: the level to fade to, 0 to 1
+    seconds: float = 0.0  # fade cues: how long the fade takes
+    text: str = ""  # text cues: what to show; memo cues: notes
+    font_size: int = 96  # text cues: point size on the display
+    parent: str = ""  # the number of the group cue this cue belongs to
+    protocol: str = "artnet"  # light cues: "artnet" or "sacn"; network cues: "udp" or "tcp"
+    group_mode: str = "all"  # group cues: "all" fires every child; "playlist" runs them one after another
+    universe: int = 0  # light cues: the Art-Net universe
+    colour: str = ""  # a hex colour shown on the cue's row, e.g. "#2980b9"; empty for none
+    pre_wait_ms: int = 0  # wait this long after GO before the cue starts
+    post_wait_ms: int = 0  # follow cues: wait this long after the cue ends before the next one starts
 
 
 @dataclass

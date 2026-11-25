@@ -137,3 +137,14 @@ def test_load_and_probe_wav(tmp_path: Path) -> None:
 def test_default_matrix_mono_goes_to_both_outputs() -> None:
     assert default_matrix(1, 2).tolist() == [[1.0, 1.0]]
     assert default_matrix(2, 2).tolist() == [[1.0, 0.0], [0.0, 1.0]]
+
+
+def test_paused_voice_makes_no_sound_until_resumed() -> None:
+    mixer = Mixer(rate=1000, out_channels=2)
+    voice = Voice(clip=mono([0.5] * 10), matrix=default_matrix(1, 2))
+    mixer.add(voice)
+    voice.paused = True
+    assert not mixer.render(4).any()
+    assert voice.position == 0
+    voice.paused = False
+    assert mixer.render(4).any()

@@ -125,6 +125,8 @@ class Voice:
     natural_end: bool = False  # reached the end of the clip without being stopped
     followed: bool = False
     stop_when_done: bool = False
+    paused: bool = False  # a paused voice keeps its place and makes no sound until resumed
+    preloaded: bool = False  # loaded by a Load cue: ready at its start, silent until its cue is run
     _fade_start: float = 1.0
     _fade_target: float = 1.0
     _fade_total: int = 0
@@ -215,7 +217,7 @@ class Mixer:
                 return out
             self._duck_current += (self._duck_target - self._duck_current) * 0.2
             for voice in self._voices:
-                if voice.done:
+                if voice.done or voice.paused:
                     continue
                 chunk = voice.read(frames)
                 if chunk is not None:

@@ -14,6 +14,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QFont, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QFrame,
     QAbstractItemView,
     QApplication,
     QCheckBox,
@@ -30,21 +31,21 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
+    QPlainTextEdit,
+    QSpinBox,
     QMessageBox,
     QProgressBar,
     QProgressDialog,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
-    QMenu,
-    QSizePolicy,
     QToolButton,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
 
-from cuerunner import allenheath, console_ui, launcher, settings_ui, spotify, spotify_ui, updater, video_out
+from cuerunner import allenheath, artnet, console_ui, launcher, midi, netsend, osc, sacn, settings_ui, spotify, spotify_ui, updater, video_out
 from cuerunner.devices import DeviceInfo, label as devices_label
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
@@ -72,15 +73,77 @@ from cuerunner.timecode import format_clock, format_duration, format_hms
 from cuerunner.version import __version__
 
 BACKUP_INTERVAL_MS = 15 * 60 * 1000  # automatic show snapshot every 15 minutes
-COLUMNS = ["#", "Name", "Length", "Fade In", "Fade Out", "Loop", "Then", "Progress", "Remaining", "Hotkey", "File"]
-PROGRESS_COL = 7
-REMAINING_COL = 8
+DMX_STEP_MS = 40  # light ramps send a new frame this often
+MAIN_QSS = """
+QWidget#mainWindow { background: #3b3b3f; }
+QPushButton#bigGo {
+    background: #c9c3ef; color: #ffffff; border: 1px solid #a9a2db; border-radius: 4px;
+    font-size: 40px; font-weight: 600;
+}
+QPushButton#bigGo:hover { background: #d7d2f5; }
+QPushButton#bigGo:pressed { background: #b4adde; }
+QLabel#standby {
+    background: #56565b; color: #d8d8dc; border: 1px solid #47474c; border-radius: 3px;
+    padding: 10px 12px; font-size: 16px;
+}
+QFrame#clockBar { background: #4c4c51; border: 1px solid #47474c; border-radius: 3px; }
+QToolButton#toolButton {
+    background: #4a4a4f; color: #f0f0f2; border: 1px solid #5a5a60; border-radius: 3px;
+    padding: 6px 12px; font-size: 13px;
+}
+QToolButton#toolButton:hover { background: #56565c; }
+QToolButton#toolButton:checked { background: #3b82d6; border-color: #3b82d6; color: #ffffff; }
+QToolButton#toolButton[kind="stop"] { background: #5a4a4a; }
+QToolButton#toolButton[kind="pause"] { background: #5e5340; }
+QToolButton#toolButton[kind="panic"] { background: #6e1c1c; border-color: #7e2a2a; }
+QToolButton#toolButton[kind="panic"]:hover { background: #8a2626; }
+QTableWidget {
+    background: #424246; alternate-background-color: #3a3a3e; color: #ececf0;
+    border: 1px solid #2e2e32; gridline-color: #2e2e32; selection-background-color: #3b82d6;
+    selection-color: #ffffff; font-size: 13px;
+}
+QHeaderView::section {
+    background: #6a6a70; color: #f5f5f7; border: 0; border-right: 1px solid #4f4f55;
+    padding: 5px 8px; font-size: 13px; font-weight: 600;
+}
+QPushButton#modeButton {
+    background: #56565b; color: #d8d8dc; border: 1px solid #47474c; padding: 4px 16px; font-size: 13px;
+}
+QPushButton#modeButton:checked { background: #6a6a70; color: #ffffff; }
+QLabel#cueCount { color: #c8c8cc; font-size: 13px; }
+"""
+
+COLUMNS = ["#", "Name", "Pre-Wait", "Length", "Post-Wait", "Fade In", "Fade Out", "Loop", "Then", "Progress", "Remaining", "Hotkey", "File"]
+PROGRESS_COL = 9
+REMAINING_COL = 10
 NAME_COL = 1
 MAX_CHANNELS = 64
 
 SHOW_FILTER = "CueRunner show (*.cuerunner.json);;All files (*)"
 AUDIO_FILTER = "Audio files (*.wav *.aiff *.aif *.mp3 *.flac *.ogg);;All files (*)"
 VIDEO_FILTER = "Video files (*.mp4 *.mov *.m4v *.avi *.mkv);;All files (*)"
+COLOURS = [
+    ("None", ""),
+    ("Red", "#c0392b"),
+    ("Orange", "#d35400"),
+    ("Yellow", "#b7950b"),
+    ("Green", "#1e8449"),
+    ("Blue", "#2471a3"),
+    ("Purple", "#7d3c98"),
+]
+SPECIAL_KINDS = {
+    "mic": "Mic",
+    "network": "Network",
+    "midi": "MIDI",
+    "light": "Light",
+    "osc": "OSC",
+    "text": "Text",
+    "fade": "Fade",
+    "control": "Control",
+    "wait": "Wait",
+    "group": "Group",
+    "memo": "Memo",
+}
 THEN_LABELS = {"none": "", "follow": "Follow", "continue": "Continue"}
 
 PLAYING_COLOUR = QColor(30, 84, 48)
@@ -181,7 +244,8 @@ class CueDialog(QDialog):
     """Edit a cue's name, fades, loop, follow/continue, hotkey and outputs."""
 
     def __init__(self, cue: Cue, parent=None, out_channels: int = MAX_CHANNELS,
-                 video_choices: list[tuple[str, str]] | None = None) -> None:
+                 video_choices: list[tuple[str, str]] | None = None,
+                 groups: list[tuple[str, str]] | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Cue {cue.number}")
         self._out_channels = out_channels
@@ -223,9 +287,124 @@ class CueDialog(QDialog):
         outputs_row.addWidget(self.route_label, 1)
         outputs_row.addWidget(self.route_button)
         form.addRow("Outputs", outputs_row)
-        if self._cue_kind in ("video", "camera"):
+        if self._cue_kind in ("video", "camera", "text"):
             form.addRow("Display", self.display_box)
+        self._build_kind_fields(cue, form, groups or [])
         form.addRow(buttons)
+
+    def _build_kind_fields(self, cue: Cue, form: QFormLayout, groups: list[tuple[str, str]]) -> None:
+        self.parent_box = QComboBox()
+        self.parent_box.addItem("None", "")
+        for label, number in groups:
+            self.parent_box.addItem(label, number)
+        self.parent_box.setCurrentIndex(max(0, self.parent_box.findData(cue.parent)))
+        form.addRow("Group", self.parent_box)
+
+        self.pre_wait_spin = QDoubleSpinBox()
+        self.pre_wait_spin.setRange(0, 3600)
+        self.pre_wait_spin.setDecimals(1)
+        self.pre_wait_spin.setSuffix(" s")
+        self.pre_wait_spin.setValue(cue.pre_wait_ms / 1000)
+        form.addRow("Pre-wait", self.pre_wait_spin)
+        self.post_wait_spin = QDoubleSpinBox()
+        self.post_wait_spin.setRange(0, 3600)
+        self.post_wait_spin.setDecimals(1)
+        self.post_wait_spin.setSuffix(" s")
+        self.post_wait_spin.setValue(cue.post_wait_ms / 1000)
+        form.addRow("Post-wait", self.post_wait_spin)
+        self.target_edit = QLineEdit(cue.target)
+        self.target_edit.setPlaceholderText("Cue number, e.g. 3")
+        self.action_box = QComboBox()
+        self.action_box.addItem("Start", "start")
+        self.action_box.addItem("Stop", "stop")
+        self.action_box.addItem("Pause", "pause")
+        self.action_box.addItem("Resume", "resume")
+        self.action_box.addItem("Goto", "goto")
+        self.action_box.addItem("Load", "load")
+        self.light_universe = QSpinBox()
+        self.light_universe.setRange(0, 32767)
+        self.light_universe.setValue(cue.universe)
+        self.osc_target_edit = QLineEdit(cue.target)
+        self.osc_target_edit.setPlaceholderText("192.168.1.10:8000")
+        self.osc_message_edit = QLineEdit(cue.text)
+        self.osc_message_edit.setPlaceholderText("/cue/1/start 0.5")
+        self.colour_box = QComboBox()
+        for label, value in COLOURS:
+            self.colour_box.addItem(label, value)
+        self.colour_box.setCurrentIndex(max(0, self.colour_box.findData(cue.colour)))
+        form.addRow("Colour", self.colour_box)
+        self.action_box.setCurrentIndex(max(0, self.action_box.findData(cue.action)))
+        self.level_spin = QSpinBox()
+        self.level_spin.setRange(0, 100)
+        self.level_spin.setSuffix(" %")
+        self.level_spin.setValue(round(cue.level * 100))
+        self.seconds_spin = QDoubleSpinBox()
+        self.seconds_spin.setRange(0, 3600)
+        self.seconds_spin.setDecimals(1)
+        self.seconds_spin.setSuffix(" s")
+        self.seconds_spin.setValue(cue.seconds)
+        self.wait_spin = QDoubleSpinBox()
+        self.wait_spin.setRange(0, 86400)
+        self.wait_spin.setDecimals(1)
+        self.wait_spin.setSuffix(" s")
+        self.wait_spin.setValue(cue.duration_ms / 1000)
+        self.text_edit = QPlainTextEdit(cue.text)
+        self.text_edit.setFixedHeight(90)
+        self.font_spin = QSpinBox()
+        self.font_spin.setRange(8, 400)
+        self.font_spin.setValue(cue.font_size)
+
+        kind = cue.kind
+        if kind == "control":
+            form.addRow("Cue number", self.target_edit)
+            form.addRow("Action", self.action_box)
+        if kind == "fade":
+            form.addRow("Cue number", self.target_edit)
+            form.addRow("Fade to", self.level_spin)
+            form.addRow("Over", self.seconds_spin)
+        if kind == "osc":
+            form.addRow("Send to", self.osc_target_edit)
+            form.addRow("Message", self.osc_message_edit)
+        if kind == "midi":
+            self.midi_port_box = QComboBox()
+            try:
+                ports = midi.output_port_names()
+            except Exception:
+                ports = []
+            for port in ports:
+                self.midi_port_box.addItem(port, port)
+            if cue.target and self.midi_port_box.findData(cue.target) < 0:
+                self.midi_port_box.addItem(f"{cue.target} (not connected)", cue.target)
+            self.midi_port_box.setCurrentIndex(max(0, self.midi_port_box.findData(cue.target)))
+            form.addRow("MIDI port", self.midi_port_box)
+            form.addRow("Message", self.osc_message_edit)
+        if kind in ("light", "network"):
+            self.protocol_box = QComboBox()
+            options = [("Art-Net", "artnet"), ("sACN", "sacn")] if kind == "light" else [("UDP", "udp"), ("TCP", "tcp")]
+            for label, value in options:
+                self.protocol_box.addItem(label, value)
+            self.protocol_box.setCurrentIndex(max(0, self.protocol_box.findData(cue.protocol)))
+            form.addRow("Protocol", self.protocol_box)
+        if kind == "network":
+            form.addRow("Send to", self.osc_target_edit)
+            form.addRow("Message", self.osc_message_edit)
+        if kind == "light":
+            form.addRow("Node address", self.osc_target_edit)
+            form.addRow("Universe", self.light_universe)
+            form.addRow("Channels", self.osc_message_edit)
+            form.addRow("Ramp over", self.seconds_spin)
+        if kind == "wait":
+            form.addRow("Wait", self.wait_spin)
+        if kind in ("text", "memo"):
+            form.addRow("Text" if kind == "text" else "Notes", self.text_edit)
+        if kind == "text":
+            form.addRow("Font size", self.font_spin)
+        if kind == "group":
+            self.group_mode_box = QComboBox()
+            self.group_mode_box.addItem("Fire all children at once", "all")
+            self.group_mode_box.addItem("Playlist: one child after another", "playlist")
+            self.group_mode_box.setCurrentIndex(max(0, self.group_mode_box.findData(cue.group_mode)))
+            form.addRow("Mode", self.group_mode_box)
 
     def _route_summary(self) -> str:
         if not self._route:
@@ -258,8 +437,38 @@ class CueDialog(QDialog):
         cue.then = self.then_box.currentData()
         cue.hotkey = self.hotkey_edit.keySequence().toString()
         cue.route = [list(group) for group in self._route]
-        if cue.kind in ("video", "camera") and self.display_box.count():
+        if cue.kind in ("video", "camera", "text") and self.display_box.count():
             cue.video_output = self.display_box.currentData()
+        cue.parent = self.parent_box.currentData() or ""
+        cue.pre_wait_ms = int(self.pre_wait_spin.value() * 1000)
+        cue.post_wait_ms = int(self.post_wait_spin.value() * 1000)
+        cue.colour = self.colour_box.currentData() or ""
+        if cue.kind in ("control", "fade"):
+            cue.target = self.target_edit.text().strip()
+        if cue.kind == "midi":
+            cue.target = self.midi_port_box.currentData() or ""
+            cue.text = self.osc_message_edit.text().strip()
+        if cue.kind in ("light", "network"):
+            cue.protocol = self.protocol_box.currentData()
+        if cue.kind in ("osc", "light", "network"):
+            cue.target = self.osc_target_edit.text().strip()
+            cue.text = self.osc_message_edit.text().strip()
+        if cue.kind == "light":
+            cue.universe = self.light_universe.value()
+            cue.seconds = self.seconds_spin.value()
+        if cue.kind == "control":
+            cue.action = self.action_box.currentData()
+        if cue.kind == "fade":
+            cue.level = self.level_spin.value() / 100
+            cue.seconds = self.seconds_spin.value()
+        if cue.kind == "wait":
+            cue.duration_ms = int(self.wait_spin.value() * 1000)
+        if cue.kind in ("text", "memo"):
+            cue.text = self.text_edit.toPlainText()
+        if cue.kind == "text":
+            cue.font_size = self.font_spin.value()
+        if cue.kind == "group":
+            cue.group_mode = self.group_mode_box.currentData()
 
 
 class MidiMappingDialog(QDialog):
@@ -329,6 +538,8 @@ class MainWindow(QMainWindow):
         self._shortcuts: list[QShortcut] = []
         self._clips: dict[str, Clip] = {}
         self._cue_voices: list[Voice] = []
+        self._timers: list[QTimer] = []
+        self._dmx_last: dict[tuple[str, int], dict[int, int]] = {}
         self._video = video_out.VideoOutputs(self)
         self._playing_cue: Cue | None = None
         self._row_bars: list[QProgressBar] = []
@@ -482,39 +693,56 @@ class MainWindow(QMainWindow):
     # --- UI setup -----------------------------------------------------
 
     def _build_toolbar(self) -> None:
-        """Top bar: file actions on the left, Pads and Settings on the right. Cue commands live in the Cues menu."""
-        bar = QToolBar("File", self)
-        bar.setMovable(False)
-        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.addToolBar(bar)
-        bar.addAction("New", self.new_show)
-        bar.addAction("Open...", self.open_show)
-        bar.addAction("Save", self.save_show)
-        bar.addSeparator()
-        add_button = QToolButton()
-        add_button.setText("Add Cue")
-        add_button.setToolTip("Add an audio, video, Spotify or console cue")
-        add_menu = QMenu(add_button)
-        add_menu.addAction("Audio Cue...", self.add_audio_cue)
-        add_menu.addAction("Video Cue...", self.add_video_cue)
-        add_menu.addAction("Camera Cue...", self.add_camera_cue)
-        add_menu.addAction("Spotify Cue...", self.add_spotify_cue)
-        add_menu.addAction("Console Cue...", self.add_console_cue)
-        add_button.setMenu(add_menu)
-        add_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        add_button.setStyleSheet("QToolButton { padding: 4px 10px; }")
-        bar.addWidget(add_button)
-        bar.addSeparator()
-        self.pads_action = bar.addAction("Pads")
-        self.pads_action.setCheckable(True)
-        self.pads_action.setChecked(True)
-        self.pads_action.setToolTip("Show or hide the soundboard pads")
-        self.pads_action.toggled.connect(self._toggle_pads)
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        bar.addWidget(spacer)
-        settings_action = bar.addAction("Settings...", self.open_settings)
-        settings_action.setToolTip("Audio, video, console and other settings")
+        """No toolbar: the cue buttons sit above the cue list, as in QLab. File actions are in the File menu."""
+
+    def _refresh_inspector(self) -> None:
+        if not hasattr(self, "inspector_label"):
+            return
+        row = self.table.currentRow()
+        cues = self.show_model.cues
+        if not 0 <= row < len(cues):
+            self.inspector_label.setText("No cue selected")
+            return
+        cue = cues[row]
+        parts = [
+            f"Cue {cue.number}: {cue.name}",
+            cue.kind.title(),
+            self._target_text(cue),
+            f"Pre-wait {cue.pre_wait_ms / 1000:g} s",
+            f"Post-wait {cue.post_wait_ms / 1000:g} s",
+        ]
+        if cue.kind == "audio" or cue.kind == "video":
+            parts.append(f"Fade in {cue.fade_in:g} s, out {cue.fade_out:g} s")
+        if cue.hotkey:
+            parts.append(f"Hotkey {cue.hotkey}")
+        if cue.parent:
+            parts.append(f"In group {cue.parent}")
+        self.inspector_label.setText("  •  ".join(part for part in parts if part))
+
+    def _target_text(self, cue: Cue) -> str:
+        """What the File column shows for each cue type."""
+        if cue.kind == "control":
+            return f"{cue.action.title()} cue {cue.target}"
+        if cue.kind == "fade":
+            return f"Fade cue {cue.target} to {round(cue.level * 100)}% over {cue.seconds:g} s"
+        if cue.kind == "wait":
+            return f"Wait {cue.duration_ms / 1000:g} s"
+        if cue.kind == "osc":
+            return f"{cue.text} to {cue.target}"
+        if cue.kind == "midi":
+            return f"{cue.text} to {cue.target or 'no port'}"
+        if cue.kind == "network":
+            return f"{cue.protocol.upper()} {cue.text} to {cue.target}"
+        if cue.kind == "mic":
+            return "Mic input on"
+        if cue.kind == "light":
+            return f"Universe {cue.universe}: {cue.text} to {cue.target}"
+        if cue.kind == "group":
+            children = sum(1 for c in self.show_model.cues if c.parent == cue.number)
+            return f"Group of {children} cue{'' if children == 1 else 's'}"
+        if cue.kind in ("text", "memo"):
+            return cue.text.replace("\n", " ")[:80]
+        return cue.file
 
     def _camera_for(self, cue: Cue) -> str:
         """The camera name for a camera cue, looked up from its video input patch."""
@@ -527,12 +755,18 @@ class MainWindow(QMainWindow):
         self.soundboard.setVisible(shown)
 
     def _build_menus(self) -> None:
+        file_menu = self.menuBar().addMenu("File")
+        file_menu.addAction("New Show", self.new_show, QKeySequence(QKeySequence.StandardKey.New))
+        file_menu.addAction("Open Show...", self.open_show, QKeySequence(QKeySequence.StandardKey.Open))
+        file_menu.addAction("Save Show", self.save_show, QKeySequence(QKeySequence.StandardKey.Save))
         cues_menu = self.menuBar().addMenu("Cues")
         cues_menu.addAction("Add Audio Cue...", self.add_audio_cue)
         cues_menu.addAction("Add Video Cue...", self.add_video_cue)
         cues_menu.addAction("Add Camera Cue...", self.add_camera_cue)
         cues_menu.addAction("Add Spotify Cue...", self.add_spotify_cue)
         cues_menu.addAction("Add Console Cue...", self.add_console_cue)
+        for kind, label in SPECIAL_KINDS.items():
+            cues_menu.addAction(f"Add {label} Cue...", lambda _=False, k=kind: self.add_special_cue(k))
         cues_menu.addSeparator()
         cues_menu.addAction("Edit Cue...", self.edit_selected)
         cues_menu.addAction("Remove Cue", self.remove_cue)
@@ -587,48 +821,89 @@ class MainWindow(QMainWindow):
 
     def _build_central(self) -> None:
         container = QWidget(self)
+        container.setObjectName("mainWindow")
+        container.setStyleSheet(MAIN_QSS)
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
 
-        status = QHBoxLayout()
+        # Top: big GO, then the standby cue name and the clock line beside it.
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        self.go_button = QPushButton("GO")
+        self.go_button.setObjectName("bigGo")
+        self.go_button.setToolTip("Start the selected cue (Space)")
+        self.go_button.clicked.connect(self.go)
+        self.go_button.setFixedSize(150, 96)
+        top.addWidget(self.go_button)
+
+        screens = QVBoxLayout()
+        screens.setSpacing(6)
+        self.now_label = QLabel("[no cue on standby]")
+        self.now_label.setObjectName("standby")
+        screens.addWidget(self.now_label)
+        clock = QFrame()
+        clock.setObjectName("clockBar")
+        clock_row = QHBoxLayout(clock)
+        clock_row.setContentsMargins(10, 4, 10, 4)
         self.trt_label = self._status_value("0:00:00")
         self.track_label = self._status_value(format_clock(0))
         self.remaining_label = self._status_value(format_clock(0))
         self.wall_label = self._status_value("--:--:--")
-        status.addWidget(self._status_title("TRT"))
-        status.addWidget(self.trt_label)
-        status.addSpacing(28)
-        status.addWidget(self._status_title("TRACK"))
-        status.addWidget(self.track_label)
-        status.addSpacing(28)
-        status.addWidget(self._status_title("REMAINING"))
-        status.addWidget(self.remaining_label)
-        status.addStretch(1)
-        status.addWidget(self.wall_label)
-        layout.addLayout(status)
+        clock_row.addWidget(self._status_title("TRT"))
+        clock_row.addWidget(self.trt_label)
+        clock_row.addSpacing(22)
+        clock_row.addWidget(self._status_title("TRACK"))
+        clock_row.addWidget(self.track_label)
+        clock_row.addSpacing(22)
+        clock_row.addWidget(self._status_title("REMAINING"))
+        clock_row.addWidget(self.remaining_label)
+        clock_row.addStretch(1)
+        clock_row.addWidget(self.wall_label)
+        screens.addWidget(clock)
+        top.addLayout(screens, 1)
+        layout.addLayout(top)
 
-        transport = QHBoxLayout()
-        self.go_button = QPushButton("GO  (Space)")
-        self.go_button.setObjectName("go")
-        self.go_button.clicked.connect(self.go)
-        self.stop_button = QPushButton("STOP")
-        self.stop_button.setObjectName("stop")
-        self.stop_button.clicked.connect(self.stop)
-        self.pause_button = QPushButton("PAUSE")
-        self.pause_button.setObjectName("pause")
-        self.pause_button.clicked.connect(self.toggle_pause)
-        self.panic_button = QPushButton("PANIC  (Esc)")
-        self.panic_button.setObjectName("panic")
-        self.panic_button.clicked.connect(self.panic)
-        transport.addWidget(self.go_button, 3)
-        transport.addWidget(self.stop_button, 2)
-        transport.addWidget(self.pause_button, 2)
-        transport.addWidget(self.panic_button, 2)
-        layout.addLayout(transport)
-
-        self.now_label = QLabel("Standby")
-        self.now_label.setObjectName("now")
-        layout.addWidget(self.now_label)
+        # Button row: cue types on the left, transport in the middle, pads on the right.
+        tools = QHBoxLayout()
+        tools.setSpacing(4)
+        for text, tip, slot in [
+            ("Audio", "Add an audio cue", self.add_audio_cue),
+            ("Video", "Add a video cue", self.add_video_cue),
+            ("Camera", "Add a camera cue", self.add_camera_cue),
+            ("Spotify", "Add a Spotify cue", self.add_spotify_cue),
+            ("Console", "Add an Allen & Heath console cue", self.add_console_cue),
+        ]:
+            tools.addWidget(self._tool_button(text, tip, slot))
+        more = QToolButton()
+        more.setObjectName("toolButton")
+        more.setText("More Cues")
+        more.setToolTip("Text, fade, control, wait, group and memo cues")
+        more.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        more.setCursor(Qt.CursorShape.PointingHandCursor)
+        more_menu = QMenu(more)
+        for kind, label in SPECIAL_KINDS.items():
+            more_menu.addAction(f"{label} Cue", lambda _=False, k=kind: self.add_special_cue(k))
+        more.setMenu(more_menu)
+        more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        tools.addWidget(more)
+        tools.addSpacing(16)
+        self.stop_button = self._tool_button("Stop", "Fade out playing cues over their fade out time", self.stop)
+        self.stop_button.setProperty("kind", "stop")
+        self.pause_button = self._tool_button("Pause", "Pause or resume all sound", self.toggle_pause)
+        self.pause_button.setProperty("kind", "pause")
+        self.panic_button = self._tool_button("Panic", "Stop everything now, with no fade (Esc)", self.panic)
+        self.panic_button.setProperty("kind", "panic")
+        tools.addWidget(self.stop_button)
+        tools.addWidget(self.pause_button)
+        tools.addWidget(self.panic_button)
+        tools.addStretch(1)
+        self.pads_button = self._tool_button("Pads", "Show or hide the soundboard pads", None)
+        self.pads_button.setCheckable(True)
+        self.pads_button.setChecked(True)
+        self.pads_button.toggled.connect(self._toggle_pads)
+        tools.addWidget(self.pads_button)
+        layout.addLayout(tools)
 
         self.table = QTableWidget(0, len(COLUMNS), self)
         self.table.setHorizontalHeaderLabels(COLUMNS)
@@ -636,16 +911,24 @@ class MainWindow(QMainWindow):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setShowGrid(False)
+        self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(NAME_COL, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(len(COLUMNS) - 1, QHeaderView.ResizeMode.Stretch)
-        self.table.setColumnWidth(0, 60)
-        self.table.setColumnWidth(PROGRESS_COL, 140)
+        for col, width in [(0, 50), (2, 80), (3, 80), (4, 80), (5, 70), (6, 70), (7, 50), (8, 80),
+                           (PROGRESS_COL, 140), (REMAINING_COL, 100), (11, 80)]:
+            self.table.setColumnWidth(col, width)
         self.table.itemDoubleClicked.connect(lambda item: self.edit_row(item.row()))
         self.table.itemSelectionChanged.connect(self._refresh_now_label)
+        self.table.itemSelectionChanged.connect(self._refresh_inspector)
         layout.addWidget(self.table, 1)
+
+        self.inspector_label = QLabel("No cue selected")
+        self.inspector_label.setObjectName("inspector")
+        self.inspector_label.setWordWrap(True)
+        layout.addWidget(self.inspector_label)
 
         bottom = QHBoxLayout()
         self.countdown = Countdown(self)
@@ -658,7 +941,50 @@ class MainWindow(QMainWindow):
         bottom.addWidget(self.soundboard, 3)
         layout.addLayout(bottom)
 
+        # Footer: Edit or Show mode, the cue count, and settings.
+        footer = QHBoxLayout()
+        footer.setSpacing(0)
+        self.edit_button = QPushButton("Edit")
+        self.show_button = QPushButton("Show")
+        for button in (self.edit_button, self.show_button):
+            button.setObjectName("modeButton")
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.edit_button.setChecked(True)
+        self.edit_button.clicked.connect(lambda: self._set_mode(editing=True))
+        self.show_button.clicked.connect(lambda: self._set_mode(editing=False))
+        footer.addWidget(self.edit_button)
+        footer.addWidget(self.show_button)
+        footer.addStretch(1)
+        self.cue_count_label = QLabel("0 cues in 1 list")
+        self.cue_count_label.setObjectName("cueCount")
+        footer.addWidget(self.cue_count_label)
+        footer.addStretch(1)
+        settings_button = self._tool_button("Settings", "Audio, video, console and other settings", None)
+        settings_button.clicked.connect(lambda: self.open_settings())
+        settings_button.setShortcut(QKeySequence(QKeySequence.StandardKey.Preferences))
+        footer.addWidget(settings_button)
+        layout.addLayout(footer)
+
+        self._editing = True
         self.setCentralWidget(container)
+
+    def _tool_button(self, text: str, tip: str, slot) -> QToolButton:
+        button = QToolButton()
+        button.setObjectName("toolButton")
+        button.setText(text)
+        button.setToolTip(tip)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        if slot is not None:
+            button.clicked.connect(lambda _checked=False, f=slot: f())
+        return button
+
+    def _set_mode(self, editing: bool) -> None:
+        """Edit lets you change cues; Show locks the list so nothing changes by accident during a show."""
+        self._editing = editing
+        self.edit_button.setChecked(editing)
+        self.show_button.setChecked(not editing)
 
     def _refresh_title(self) -> None:
         name = self.show_path.name if self.show_path else "Untitled"
@@ -666,6 +992,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_table(self) -> None:
         cues = self.show_model.cues
+        if hasattr(self, "cue_count_label"):
+            self.cue_count_label.setText(f"{len(cues)} cue{'' if len(cues) == 1 else 's'} in 1 list")
         playhead = self._playhead_row()
         playing_row = self._row_of(self._playing_cue)
 
@@ -675,8 +1003,10 @@ class MainWindow(QMainWindow):
             marker = PLAYHEAD_MARK if row == playhead else ""
             values = [
                 f"{marker} {cue.number}".strip(),
-                cue.name,
+                ("    " if cue.parent else "") + cue.name,
+                f"{cue.pre_wait_ms / 1000:g} s" if cue.pre_wait_ms else "",
                 format_duration(cue.duration_ms),
+                f"{cue.post_wait_ms / 1000:g} s" if cue.post_wait_ms else "",
                 f"{cue.fade_in:g} s",
                 f"{cue.fade_out:g} s",
                 "✓" if cue.loop else "",
@@ -684,7 +1014,7 @@ class MainWindow(QMainWindow):
                 "",
                 "",
                 cue.hotkey,
-                cue.file,
+                self._target_text(cue),
             ]
             for col, value in enumerate(values):
                 if col == PROGRESS_COL:
@@ -692,6 +1022,8 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 if row == playing_row:
                     item.setBackground(QBrush(PLAYING_COLOUR))
+                elif cue.colour:
+                    item.setBackground(QBrush(QColor(cue.colour)))
                 if row == playhead:
                     font = QFont()
                     font.setBold(True)
@@ -709,6 +1041,7 @@ class MainWindow(QMainWindow):
         self.trt_label.setText(format_hms(total_ms))
         self.soundboard.set_pads(self.show_model.pads)
         self._rebuild_shortcuts()
+        self._refresh_inspector()
         self._refresh_now_label()
         self._update_clock()
 
@@ -913,6 +1246,143 @@ class MainWindow(QMainWindow):
             ))
         self._refresh_table()
 
+    def add_special_cue(self, kind: str) -> None:
+        cue = Cue(number=self.show_model.next_number(), name=SPECIAL_KINDS[kind], kind=kind)
+        self.show_model.cues.append(cue)
+        self._refresh_table()
+        self.edit_row(len(self.show_model.cues) - 1)
+
+    def _after(self, ms: int, callback) -> None:
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(callback)
+        timer.start(max(0, ms))
+        self._timers = [t for t in self._timers if t.isActive()] + [timer]
+
+    def _finish(self, row: int) -> None:
+        """An instant cue is done: in a playlist group start the next child, otherwise move the playhead."""
+        next_child = self._playlist_next_row(row)
+        if next_child is not None:
+            self.go_row(next_child, replace=False)
+        self._advance(row)
+
+    def _send_dmx(self, cue: Cue, levels: dict[int, int]) -> None:
+        if cue.protocol == "sacn":
+            sacn.send(cue.universe, levels, host=cue.target)
+        else:
+            artnet.send(cue.target, cue.universe, levels)
+
+    def _run_light(self, cue: Cue) -> None:
+        """Send a light cue's levels, ramping from the last levels sent to the same node and universe."""
+        levels = artnet.parse_levels(cue.text)
+        key = (cue.protocol, cue.target, cue.universe)
+        start = self._dmx_last.get(key, {})
+        if cue.seconds <= 0:
+            self._send_dmx(cue, levels)
+        else:
+            steps = max(1, round(cue.seconds * 1000 / DMX_STEP_MS))
+            for step in range(1, steps + 1):
+                frame = artnet.ramp_levels(start, levels, step / steps)
+                self._after(step * DMX_STEP_MS, lambda f=frame: self._send_dmx(cue, f))
+        self._dmx_last[key] = dict(levels)
+
+    def _advance(self, row: int) -> None:
+        cues = self.show_model.cues
+        self.table.selectRow(min(row + 1, len(cues) - 1))
+
+    def _control(self, cue: Cue) -> None:
+        number = cue.target.strip()
+        cues = self.show_model.cues
+        target_row = next((i for i, c in enumerate(cues) if c.number == number), None)
+        if target_row is None:
+            QMessageBox.warning(self, "Cannot run cue", f"{cue.name}\n\nThere is no cue numbered \"{number}\".")
+            return
+        target = cues[target_row]
+        if cue.action == "stop":
+            self._stop_cue(target)
+        elif cue.action in ("pause", "resume"):
+            self._pause_cue(target, paused=cue.action == "pause")
+        elif cue.action == "goto":
+            self.table.selectRow(target_row)
+        elif cue.action == "load":
+            self._preload(target)
+        else:
+            self.go_row(target_row, replace=True)
+
+    def _stop_cue(self, target: Cue) -> None:
+        if target.kind == "mic":
+            self.stop_talkback()
+            return
+        if target.kind in ("video", "camera", "text"):
+            self._video.stop_all()
+        if self.mixer is None:
+            return
+        for voice in self._cue_voices:
+            if not voice.done and not voice.stop_when_done and voice.tag is target:
+                self.mixer.fade_out(voice, voice.tag.fade_out)
+
+    def _playlist_next_row(self, row: int) -> int | None:
+        """In a playlist group, the row of the child after this one, or None."""
+        cues = self.show_model.cues
+        if not 0 <= row < len(cues) or not cues[row].parent:
+            return None
+        group = next((c for c in cues if c.kind == "group" and c.number == cues[row].parent), None)
+        if group is None or group.group_mode != "playlist":
+            return None
+        children = [i for i, c in enumerate(cues) if c.parent == group.number]
+        if row not in children or children.index(row) + 1 >= len(children):
+            return None
+        return children[children.index(row) + 1]
+
+    def _pause_cue(self, target: Cue, paused: bool) -> None:
+        for voice in self._cue_voices:
+            if not voice.done and voice.tag is target:
+                voice.paused = paused
+
+    def _fade_cue(self, cue: Cue) -> None:
+        number = cue.target.strip()
+        target = next((c for c in self.show_model.cues if c.number == number), None)
+        if target is not None and target.kind == "video":
+            self._ramp_video(number, cue.level, cue.seconds)
+            return
+        if self.mixer is None:
+            return
+        for voice in self._cue_voices:
+            if not voice.done and voice.tag.number == number:
+                voice.fade(cue.level, cue.seconds, self.mixer.rate)
+
+    def _ramp_video(self, number: str, level: float, seconds: float) -> None:
+        """Move a playing video's audio level to the target over the given seconds."""
+        start = self._video.volume(number)
+        if start is None:
+            return
+        if seconds <= 0:
+            self._video.set_volume(number, level)
+            return
+        steps = max(1, round(seconds * 1000 / DMX_STEP_MS))
+        for step in range(1, steps + 1):
+            value = start + (level - start) * step / steps
+            self._after(step * DMX_STEP_MS, lambda v=value: self._video.set_volume(number, v))
+
+    def _preload(self, cue: Cue) -> None:
+        """Load an audio cue into the mixer paused, so running it later starts at once."""
+        if self.mixer is None or cue.kind != "audio" or not cue.file:
+            return
+        if any(v.tag is cue and not v.done for v in self._cue_voices):
+            return
+        clip = self._clip(cue.file)
+        voice = Voice(
+            clip=clip,
+            matrix=route_matrix(cue.route, clip.channels, self.mixer.out_channels),
+            loop=cue.loop,
+            bed=True,
+            tag=cue,
+            paused=True,
+            preloaded=True,
+        )
+        self.mixer.add(voice)
+        self._cue_voices.append(voice)
+
     def add_camera_cue(self) -> None:
         patches = self.show_model.video_inputs
         if not patches:
@@ -941,12 +1411,17 @@ class MainWindow(QMainWindow):
             cue.duration_ms = 0
 
     def edit_row(self, row: int) -> None:
-        if not 0 <= row < len(self.show_model.cues):
+        if not self._editing or not 0 <= row < len(self.show_model.cues):
             return
         cue = self.show_model.cues[row]
+        groups = [
+            (f"{c.number}  {c.name}", c.number)
+            for c in self.show_model.cues if c.kind == "group" and c.number != cue.number
+        ]
         dialog = CueDialog(
             cue, self, self.mixer.out_channels if self.mixer is not None else MAX_CHANNELS,
             video_choices=video_out.output_choices(self.show_model.video_routes),
+            groups=groups,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             dialog.apply_to(cue)
@@ -974,7 +1449,7 @@ class MainWindow(QMainWindow):
         if row >= 0:
             self.go_row(row)
 
-    def go_row(self, row: int, replace: bool = True) -> None:
+    def go_row(self, row: int, replace: bool = True, _pre_done: bool = False) -> None:
         """Start the cue in this row with its fade-in and move the playhead down.
 
         replace=True fades out whatever cue is already playing. replace=False lets it run on.
@@ -983,6 +1458,9 @@ class MainWindow(QMainWindow):
         if not 0 <= row < len(cues):
             return
         cue = cues[row]
+        if cue.pre_wait_ms > 0 and not _pre_done:
+            self._after(cue.pre_wait_ms, lambda: self.go_row(row, replace=replace, _pre_done=True))
+            return
         if cue.kind == "spotify":
             self._play_spotify_cue(cue)
             self.table.selectRow(min(row + 1, len(cues) - 1))
@@ -996,7 +1474,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\nThis video cue has no file.")
             else:
                 try:
-                    self._video.play(cue.video_output, cue.file, self.show_model.video_routes)
+                    self._video.play(cue.video_output, cue.file, self.show_model.video_routes, cue.number)
                 except Exception as exc:
                     QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
             self.table.selectRow(min(row + 1, len(cues) - 1))
@@ -1008,6 +1486,75 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
             self.table.selectRow(min(row + 1, len(cues) - 1))
             return
+        if cue.kind == "memo":
+            self._finish(row)
+            return
+        if cue.kind == "mic":
+            self.start_talkback()
+            self._finish(row)
+            return
+        if cue.kind == "network":
+            try:
+                netsend.send(cue.protocol, cue.target, cue.text)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot send network cue", f"{cue.name}\n\n{exc}")
+            self._finish(row)
+            return
+        if cue.kind == "midi":
+            try:
+                midi.send_out(cue.target, cue.text)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot send MIDI cue", f"{cue.name}\n\n{exc}")
+            self._finish(row)
+            return
+        if cue.kind == "light":
+            try:
+                self._run_light(cue)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot send light cue", f"{cue.name}\n\n{exc}")
+            self._finish(row)
+            return
+        if cue.kind == "osc":
+            try:
+                osc.send(cue.target, cue.text)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot send OSC", f"{cue.name}\n\n{exc}")
+            self._finish(row)
+            return
+        if cue.kind == "wait":
+            next_row = self._playlist_next_row(row)
+            if next_row is None:
+                next_row = row + 1 if row + 1 < len(cues) else None
+            if next_row is not None:
+                self._after(cue.duration_ms, lambda r=next_row: self.go_row(r, replace=False))
+            self._advance(row)
+            return
+        if cue.kind == "group":
+            children = [i for i, child in enumerate(cues) if child.parent == cue.number]
+            if cue.group_mode == "playlist":
+                if children:
+                    self.go_row(children[0], replace=False)
+            else:
+                for i in children:
+                    self.go_row(i, replace=False)
+            self._advance(row)
+            return
+        if cue.kind == "control":
+            self._control(cue)
+            if cue.action != "goto":  # Goto leaves the playhead on its target
+                self._finish(row)
+            return
+        if cue.kind == "text":
+            try:
+                self._video.show_text(cue.video_output, cue.text, cue.font_size, self.show_model.video_routes)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
+            self._finish(row)
+            return
+        if cue.kind == "fade":
+            self._fade_cue(cue)
+            self._finish(row)
+            return
         if self.mixer is None:
             return
         if cue.kind == "audio" and cue.file:
@@ -1016,9 +1563,18 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
                 return
+            ready = next((v for v in self._cue_voices if v.tag is cue and v.preloaded and not v.done), None)
+            if ready is not None:
+                ready.paused = False
+                ready.preloaded = False
+                self._playing_cue = cue
+                if cue.then == "continue" and row + 1 < len(cues):
+                    self.go_row(row + 1, replace=False)
+                self.table.selectRow(min(row + 1, len(cues) - 1))
+                return
             if replace:
                 for voice in self._cue_voices:
-                    if not voice.done and not voice.stop_when_done:
+                    if not voice.done and not voice.stop_when_done and not voice.preloaded:
                         self.mixer.fade_out(voice, voice.tag.fade_out)
             voice = Voice(
                 clip=clip,
@@ -1060,6 +1616,9 @@ class MainWindow(QMainWindow):
             self.mixer.clear()
             self.mixer.paused = False
         self._cue_voices = []
+        for timer in self._timers:
+            timer.stop()
+        self._timers = []
         self._playing_cue = None
         self._radio = None
         self._radio_voice = None
@@ -1108,11 +1667,18 @@ class MainWindow(QMainWindow):
             if voice.natural_end and not voice.followed:
                 voice.followed = True
                 row = self._row_of(voice.tag)
-                if row >= 0 and voice.tag.then == "follow" and row + 1 < len(cues):
-                    self.go_row(row + 1, replace=False)
+                next_child = self._playlist_next_row(row) if row >= 0 else None
+                if next_child is not None:
+                    self.go_row(next_child, replace=False)
+                elif row >= 0 and voice.tag.then == "follow" and row + 1 < len(cues):
+                    if voice.tag.post_wait_ms > 0:
+                        self._after(voice.tag.post_wait_ms, lambda r=row + 1: self.go_row(r, replace=False))
+                    else:
+                        self.go_row(row + 1, replace=False)
 
         self._cue_voices = [v for v in self._cue_voices if not v.done]
-        active = self._cue_voices[-1].tag if self._cue_voices else None
+        sounding = [v for v in self._cue_voices if not v.preloaded]
+        active = sounding[-1].tag if sounding else None
         if active is not self._playing_cue:
             self._playing_cue = active
             self._refresh_table()
