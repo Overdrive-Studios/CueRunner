@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cuerunner import allenheath, console_ui, settings_ui, spotify, spotify_ui, updater
+from cuerunner import allenheath, console_ui, launcher, settings_ui, spotify, spotify_ui, updater
 from cuerunner.devices import DeviceInfo, label as devices_label
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
@@ -357,7 +357,22 @@ class MainWindow(QMainWindow):
 
         self._open_default_output()
         self._refresh_title()
-        self.resize(1200, 820)
+        self._fit_to_screen()
+
+    def _fit_to_screen(self) -> None:
+        """Size the window to the screen it opens on so no controls run off the edge."""
+        self.setMinimumSize(900, 620)
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1200, 820)
+            return
+        area = screen.availableGeometry()
+        width = min(1200, area.width() - 40)
+        height = min(820, area.height() - 60)
+        self.resize(max(900, width), max(620, height))
+        frame = self.frameGeometry()
+        frame.moveCenter(area.center())
+        self.move(frame.topLeft())
 
     # --- Audio output -------------------------------------------------
 
@@ -478,31 +493,39 @@ class MainWindow(QMainWindow):
     def _build_menus(self) -> None:
         audio_menu = self.menuBar().addMenu("Audio")
         audio_menu.addAction("Output Device...", self.choose_output)
-        audio_menu.addSeparator()
-        audio_menu.addAction("Talkback Mic On", self.start_talkback)
-        audio_menu.addAction("Talkback Mic Off", self.stop_talkback)
         audio_menu.addAction("Choose Mic Input...", self.choose_mic)
         audio_menu.addSeparator()
-        audio_menu.addAction("Record Start", self.start_recording)
-        audio_menu.addAction("Record Stop", self.stop_recording)
-        audio_menu.addAction("Record Input Settings...", self.choose_record_input)
+        talkback = audio_menu.addMenu("Talkback")
+        talkback.addAction("Mic On", self.start_talkback)
+        talkback.addAction("Mic Off", self.stop_talkback)
+        recording = audio_menu.addMenu("Recording")
+        recording.addAction("Start", self.start_recording)
+        recording.addAction("Stop", self.stop_recording)
+        recording.addSeparator()
+        recording.addAction("Input Settings...", self.choose_record_input)
+        radio = audio_menu.addMenu("Venue Radio")
+        radio.addAction("Start", self.start_radio)
+        radio.addAction("Stop", self.stop_radio)
+        radio.addSeparator()
+        radio.addAction("Settings...", self.radio_settings)
+        radio.addAction("Routing...", self.radio_routing)
         audio_menu.addSeparator()
-        audio_menu.addAction("Start Phone Remote...", self.start_remote)
-        audio_menu.addAction("Stop Phone Remote", self.stop_remote)
-        audio_menu.addSeparator()
-        audio_menu.addAction("Start MIDI Input...", self.start_midi)
-        audio_menu.addAction("Stop MIDI Input", self.stop_midi)
-        audio_menu.addAction("MIDI Mapping...", self.edit_midi_mapping)
         settings_action = audio_menu.addAction("Settings...", self.open_settings)
         settings_action.setShortcut(QKeySequence(QKeySequence.StandardKey.Preferences))
         settings_action.setMenuRole(QAction.MenuRole.PreferencesRole)
-        audio_menu.addAction("Spotify...", self.open_spotify)
-        audio_menu.addAction("Allen & Heath Console...", self.open_console)
-        audio_menu.addSeparator()
-        audio_menu.addAction("Start Venue Radio", self.start_radio)
-        audio_menu.addAction("Stop Venue Radio", self.stop_radio)
-        audio_menu.addAction("Venue Radio Settings...", self.radio_settings)
-        audio_menu.addAction("Venue Radio Routing...", self.radio_routing)
+
+        control_menu = self.menuBar().addMenu("Control")
+        remote = control_menu.addMenu("Phone Remote")
+        remote.addAction("Start...", self.start_remote)
+        remote.addAction("Stop", self.stop_remote)
+        midi = control_menu.addMenu("MIDI")
+        midi.addAction("Start Input...", self.start_midi)
+        midi.addAction("Stop Input", self.stop_midi)
+        midi.addSeparator()
+        midi.addAction("Mapping...", self.edit_midi_mapping)
+        control_menu.addSeparator()
+        control_menu.addAction("Allen & Heath Console...", self.open_console)
+        control_menu.addAction("Spotify...", self.open_spotify)
         help_menu = self.menuBar().addMenu("Help")
         help_menu.addAction("Check for Updates...", self.check_for_updates)
         help_menu.addAction(f"About CueRunner {__version__}", self.about)
@@ -694,14 +717,17 @@ class MainWindow(QMainWindow):
 
     def open_show(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(self, "Open show", "", SHOW_FILTER)
-        if not filename:
-            return
+        if filename:
+            self.open_show_path(Path(filename))
+
+    def open_show_path(self, path: Path) -> None:
         try:
-            self.show_model = Show.load(Path(filename))
+            self.show_model = Show.load(path)
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "Could not open show", str(exc))
             return
-        self.show_path = Path(filename)
+        self.show_path = path
+        launcher.remember_show(path)
         self.panic()
         self._refresh_table()
         self._refresh_title()
@@ -725,6 +751,7 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.critical(self, "Could not save show", str(exc))
             return
+        launcher.remember_show(self.show_path)
         self._refresh_title()
 
     # --- Cue actions --------------------------------------------------
@@ -1104,7 +1131,15 @@ class MainWindow(QMainWindow):
             self._midi.set_mapping(self.show_model.midi_map)
 
     def open_settings(self) -> None:
-        dialog = settings_ui.SettingsDialog(self.show_model, self)
+        actions = {
+            "output": self.choose_output,
+            "mic": self.choose_mic,
+            "record_input": self.choose_record_input,
+            "radio_settings": self.radio_settings,
+            "radio_routing": self.radio_routing,
+            "midi_mapping": self.edit_midi_mapping,
+        }
+        dialog = settings_ui.SettingsDialog(self.show_model, self, actions)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             settings_ui.apply_settings(self.show_model, dialog.values())
 
@@ -1365,5 +1400,13 @@ def run() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     apply_dark_theme(app)
     window = MainWindow()
+    start = launcher.LaunchDialog(window.check_for_updates, window.about)
+    if start.exec() != QDialog.DialogCode.Accepted:
+        window.close()
+        return 0
+    if start.choice == "open":
+        window.open_show()
+    elif start.choice == "recent" and start.path is not None:
+        window.open_show_path(start.path)
     window.show()
     return app.exec()

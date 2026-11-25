@@ -1,4 +1,4 @@
-"""Settings page: phone remote port, talkback duck level, Allen & Heath console and Spotify client ID."""
+"""Settings page: general options, device and routing shortcuts, Allen & Heath console and Spotify client ID."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -19,6 +20,16 @@ from cuerunner.console_ui import FAMILIES
 from cuerunner.model import Show
 
 REMOTE_PORT_RANGE = (1024, 65535)
+
+# Shortcuts on the Devices tab: (button label, key the main window passes in).
+DEVICE_ACTIONS = [
+    ("Output device...", "output"),
+    ("Talkback mic input...", "mic"),
+    ("Recording input...", "record_input"),
+    ("Venue radio settings...", "radio_settings"),
+    ("Venue radio routing...", "radio_routing"),
+    ("MIDI mapping...", "midi_mapping"),
+]
 
 
 def settings_from(show: Show) -> dict:
@@ -41,11 +52,12 @@ def apply_settings(show: Show, values: dict) -> None:
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, show: Show, parent=None) -> None:
+    def __init__(self, show: Show, parent=None, actions: dict | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(480, 300)
+        self.resize(520, 360)
         current = settings_from(show)
+        actions = actions or {}
 
         tabs = QTabWidget()
 
@@ -62,6 +74,17 @@ class SettingsDialog(QDialog):
         self.duck.setValue(current["duck_percent"])
         general_form.addRow("Music level while talkback is open", self.duck)
         tabs.addTab(general, "General")
+
+        devices = QWidget()
+        devices_layout = QVBoxLayout(devices)
+        devices_layout.addWidget(QLabel("Each button opens its own window with the details."))
+        for label, key in DEVICE_ACTIONS:
+            if key in actions:
+                button = QPushButton(label)
+                button.clicked.connect(actions[key])
+                devices_layout.addWidget(button)
+        devices_layout.addStretch(1)
+        tabs.addTab(devices, "Devices")
 
         console = QWidget()
         console_form = QFormLayout(console)
