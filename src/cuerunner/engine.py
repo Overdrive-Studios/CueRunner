@@ -195,6 +195,11 @@ class Mixer:
         with self._lock:
             return list(self._voices)
 
+    def devamp(self, voice: Voice) -> None:
+        """End the loop: the voice plays on from where it is to the end of its clip."""
+        with self._lock:
+            voice.loop = False
+
     def fade_out(self, voice: Voice, seconds: float) -> None:
         with self._lock:
             voice.fade(0.0, seconds, self.rate, stop_when_done=True)

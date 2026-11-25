@@ -140,6 +140,7 @@ SPECIAL_KINDS = {
     "osc": "OSC",
     "text": "Text",
     "fade": "Fade",
+    "devamp": "Devamp",
     "control": "Control",
     "wait": "Wait",
     "group": "Group",
@@ -362,6 +363,8 @@ class CueDialog(QDialog):
         if kind == "control":
             form.addRow("Cue number", self.target_edit)
             form.addRow("Action", self.action_box)
+        if kind == "devamp":
+            form.addRow("Loop cue", self.target_edit)
         if kind == "fade":
             form.addRow("Cue number", self.target_edit)
             form.addRow("Fade to", self.level_spin)
@@ -468,7 +471,7 @@ class CueDialog(QDialog):
         cue.post_wait_ms = int(self.post_wait_spin.value() * 1000)
         cue.trigger_tc = self.trigger_tc_edit.text().strip()
         cue.colour = self.colour_box.currentData() or ""
-        if cue.kind in ("control", "fade"):
+        if cue.kind in ("control", "fade", "devamp"):
             cue.target = self.target_edit.text().strip()
         if cue.kind == "midi":
             cue.target = self.midi_port_box.currentData() or ""
@@ -797,6 +800,8 @@ class MainWindow(QMainWindow):
         """What the File column shows for each cue type."""
         if cue.kind == "control":
             return f"{cue.action.title()} cue {cue.target}"
+        if cue.kind == "devamp":
+            return f"Ends the loop on cue {cue.target}"
         if cue.kind == "fade":
             return f"Fade cue {cue.target} to {round(cue.level * 100)}% over {cue.seconds:g} s"
         if cue.kind == "wait":
@@ -1486,6 +1491,15 @@ class MainWindow(QMainWindow):
             if not voice.done and voice.tag is target:
                 voice.paused = paused
 
+    def _devamp_cue(self, cue: Cue) -> None:
+        """Stop the loop on the target cue's playing voices so they play out to the end."""
+        if self.mixer is None:
+            return
+        number = cue.target.strip()
+        for voice in self._cue_voices:
+            if not voice.done and voice.tag is not None and getattr(voice.tag, "number", None) == number:
+                self.mixer.devamp(voice)
+
     def _fade_cue(self, cue: Cue) -> None:
         number = cue.target.strip()
         target = next((c for c in self.show_model.cues if c.number == number), None)
@@ -1707,6 +1721,10 @@ class MainWindow(QMainWindow):
             return
         if cue.kind == "fade":
             self._fade_cue(cue)
+            self._finish(row)
+            return
+        if cue.kind == "devamp":
+            self._devamp_cue(cue)
             self._finish(row)
             return
         if self.mixer is None:
