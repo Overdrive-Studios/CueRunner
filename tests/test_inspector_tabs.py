@@ -186,18 +186,48 @@ def test_editing_the_selected_effect_writes_it_back(window):
 
     select(window, Cue(number="1", name="Song", kind="audio"))
     window._add_effect("peaking")
-    window.insp_fx_freq.setValue(440)
-    window.insp_fx_gain.setValue(-5.0)
+    window.insp_fx_params._spins["freq"].setValue(440)
+    window.insp_fx_params._spins["gain_db"].setValue(-5.0)
     effect = window.show_model.cues[0].effects[0]
     assert effect["freq"] == 440 and effect["gain_db"] == -5.0
 
 
-def test_gain_is_greyed_out_for_a_filter(window):
+def test_the_controls_follow_whichever_effect_is_chosen(window):
+    """A filter has no gain to set; a compressor has a threshold and ratio."""
     from cuerunner.model import Cue
 
     select(window, Cue(number="1", name="Song", kind="audio"))
     window._add_effect("highpass")
-    assert not window.insp_fx_gain.isEnabled()  # a filter cuts by frequency, not by gain
+    assert set(window.insp_fx_params._spins) == {"freq", "q"}
+
+    window._add_effect("compressor")
+    assert "threshold_db" in window.insp_fx_params._spins
+    assert "ratio" in window.insp_fx_params._spins
+
+
+def test_the_effect_list_names_each_effect(window):
+    from cuerunner.model import Cue
+
+    select(window, Cue(number="1", name="Song", kind="audio"))
+    window._add_effect("reverb")
+    window._add_effect("delay")
+    labels = [window.insp_fx_list.item(i).text() for i in range(window.insp_fx_list.count())]
+    assert "Reverb" in labels[0]
+    assert "Delay" in labels[1]
+
+
+def test_every_effect_in_the_menu_can_be_added_and_played(window):
+    """Whatever the menu offers must survive being added to a cue and reaching the mixer."""
+    from cuerunner import fx
+    from cuerunner.model import Cue
+
+    select(window, Cue(number="1", name="Song", kind="audio"))
+    cue = window.show_model.cues[0]
+    for kind in fx.EFFECTS:
+        cue.effects = [fx.new_effect(kind)]
+        window._refresh_effects(cue)
+        voice, clip = a_voice(channels=2)
+        window._apply_levels(voice, cue, clip)
 
 
 def test_the_old_three_band_eq_is_carried_over(window):
