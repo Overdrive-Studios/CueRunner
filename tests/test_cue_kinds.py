@@ -95,3 +95,41 @@ def test_target_column_describes_each_kind(window):
     assert window._target_text(window.show_model.cues[0]) == "Fade cue 3 to 50% over 4 s"
     assert window._target_text(window.show_model.cues[1]) == "Stop cue 3"
     assert window._target_text(window.show_model.cues[2]) == "Wait 2.5 s"
+
+
+def test_osc_cue_sends_its_message(window):
+    import socket
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.settimeout(2)
+    port = listener.getsockname()[1]
+    try:
+        row = _add(window, "osc", "1", target=f"127.0.0.1:{port}", text="/lights/1 1")
+        window.go_row(row)
+        packet, _ = listener.recvfrom(1024)
+    finally:
+        listener.close()
+    assert packet.startswith(b"/lights/1\0\0")
+
+
+def test_control_pause_and_resume_flip_the_voice(window):
+    from cuerunner.engine import Voice, default_matrix, Clip
+    import numpy as np
+
+    target = _add(window, "memo", "5")
+    voice = Voice(clip=Clip(np.zeros((10, 1), dtype=np.float32)), matrix=default_matrix(1, 2), tag=window.show_model.cues[target])
+    window._cue_voices.append(voice)
+    window._pause_cue(window.show_model.cues[target], paused=True)
+    assert voice.paused
+    window._pause_cue(window.show_model.cues[target], paused=False)
+    assert not voice.paused
+
+
+def test_cue_colour_is_saved(tmp_path):
+    from cuerunner.model import Cue, Show
+
+    show = Show(cues=[Cue(number="1", name="x", colour="#2471a3")])
+    path = tmp_path / "c.cuerunner.json"
+    show.save(path)
+    assert Show.load(path).cues[0].colour == "#2471a3"

@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cuerunner import allenheath, console_ui, launcher, settings_ui, spotify, spotify_ui, updater, video_out
+from cuerunner import allenheath, artnet, console_ui, launcher, osc, settings_ui, spotify, spotify_ui, updater, video_out
 from cuerunner.devices import DeviceInfo, label as devices_label
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
@@ -121,7 +121,18 @@ MAX_CHANNELS = 64
 SHOW_FILTER = "CueRunner show (*.cuerunner.json);;All files (*)"
 AUDIO_FILTER = "Audio files (*.wav *.aiff *.aif *.mp3 *.flac *.ogg);;All files (*)"
 VIDEO_FILTER = "Video files (*.mp4 *.mov *.m4v *.avi *.mkv);;All files (*)"
+COLOURS = [
+    ("None", ""),
+    ("Red", "#c0392b"),
+    ("Orange", "#d35400"),
+    ("Yellow", "#b7950b"),
+    ("Green", "#1e8449"),
+    ("Blue", "#2471a3"),
+    ("Purple", "#7d3c98"),
+]
 SPECIAL_KINDS = {
+    "light": "Light",
+    "osc": "OSC",
     "text": "Text",
     "fade": "Fade",
     "control": "Control",
@@ -302,6 +313,20 @@ class CueDialog(QDialog):
         self.action_box = QComboBox()
         self.action_box.addItem("Start", "start")
         self.action_box.addItem("Stop", "stop")
+        self.action_box.addItem("Pause", "pause")
+        self.action_box.addItem("Resume", "resume")
+        self.light_universe = QSpinBox()
+        self.light_universe.setRange(0, 32767)
+        self.light_universe.setValue(cue.universe)
+        self.osc_target_edit = QLineEdit(cue.target)
+        self.osc_target_edit.setPlaceholderText("192.168.1.10:8000")
+        self.osc_message_edit = QLineEdit(cue.text)
+        self.osc_message_edit.setPlaceholderText("/cue/1/start 0.5")
+        self.colour_box = QComboBox()
+        for label, value in COLOURS:
+            self.colour_box.addItem(label, value)
+        self.colour_box.setCurrentIndex(max(0, self.colour_box.findData(cue.colour)))
+        form.addRow("Colour", self.colour_box)
         self.action_box.setCurrentIndex(max(0, self.action_box.findData(cue.action)))
         self.level_spin = QSpinBox()
         self.level_spin.setRange(0, 100)
@@ -331,6 +356,13 @@ class CueDialog(QDialog):
             form.addRow("Cue number", self.target_edit)
             form.addRow("Fade to", self.level_spin)
             form.addRow("Over", self.seconds_spin)
+        if kind == "osc":
+            form.addRow("Send to", self.osc_target_edit)
+            form.addRow("Message", self.osc_message_edit)
+        if kind == "light":
+            form.addRow("Node address", self.osc_target_edit)
+            form.addRow("Universe", self.light_universe)
+            form.addRow("Channels", self.osc_message_edit)
         if kind == "wait":
             form.addRow("Wait", self.wait_spin)
         if kind in ("text", "memo"):
@@ -374,8 +406,14 @@ class CueDialog(QDialog):
         cue.parent = self.parent_box.currentData() or ""
         cue.pre_wait_ms = int(self.pre_wait_spin.value() * 1000)
         cue.post_wait_ms = int(self.post_wait_spin.value() * 1000)
+        cue.colour = self.colour_box.currentData() or ""
         if cue.kind in ("control", "fade"):
             cue.target = self.target_edit.text().strip()
+        if cue.kind in ("osc", "light"):
+            cue.target = self.osc_target_edit.text().strip()
+            cue.text = self.osc_message_edit.text().strip()
+        if cue.kind == "light":
+            cue.universe = self.light_universe.value()
         if cue.kind == "control":
             cue.action = self.action_box.currentData()
         if cue.kind == "fade":
@@ -620,6 +658,10 @@ class MainWindow(QMainWindow):
             return f"Fade cue {cue.target} to {round(cue.level * 100)}% over {cue.seconds:g} s"
         if cue.kind == "wait":
             return f"Wait {cue.duration_ms / 1000:g} s"
+        if cue.kind == "osc":
+            return f"{cue.text} to {cue.target}"
+        if cue.kind == "light":
+            return f"Universe {cue.universe}: {cue.text} to {cue.target}"
         if cue.kind == "group":
             children = sum(1 for c in self.show_model.cues if c.parent == cue.number)
             return f"Group of {children} cue{'' if children == 1 else 's'}"
@@ -896,6 +938,8 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 if row == playing_row:
                     item.setBackground(QBrush(PLAYING_COLOUR))
+                elif cue.colour:
+                    item.setBackground(QBrush(QColor(cue.colour)))
                 if row == playhead:
                     font = QFont()
                     font.setBold(True)
@@ -1144,6 +1188,8 @@ class MainWindow(QMainWindow):
         target = cues[target_row]
         if cue.action == "stop":
             self._stop_cue(target)
+        elif cue.action in ("pause", "resume"):
+            self._pause_cue(target, paused=cue.action == "pause")
         else:
             self.go_row(target_row, replace=True)
 
@@ -1155,6 +1201,11 @@ class MainWindow(QMainWindow):
         for voice in self._cue_voices:
             if not voice.done and not voice.stop_when_done and voice.tag is target:
                 self.mixer.fade_out(voice, voice.tag.fade_out)
+
+    def _pause_cue(self, target: Cue, paused: bool) -> None:
+        for voice in self._cue_voices:
+            if not voice.done and voice.tag is target:
+                voice.paused = paused
 
     def _fade_cue(self, cue: Cue) -> None:
         if self.mixer is None:
@@ -1268,6 +1319,20 @@ class MainWindow(QMainWindow):
             self.table.selectRow(min(row + 1, len(cues) - 1))
             return
         if cue.kind == "memo":
+            self._advance(row)
+            return
+        if cue.kind == "light":
+            try:
+                artnet.send(cue.target, cue.universe, artnet.parse_levels(cue.text))
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot send light cue", f"{cue.name}\n\n{exc}")
+            self._advance(row)
+            return
+        if cue.kind == "osc":
+            try:
+                osc.send(cue.target, cue.text)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot send OSC", f"{cue.name}\n\n{exc}")
             self._advance(row)
             return
         if cue.kind == "wait":

@@ -28,7 +28,7 @@ DEFAULT_REMOTE_PORT = 8080
 class Cue:
     number: str
     name: str
-    kind: str = "audio"  # audio, video, camera, text, fade, control, wait, group, memo, console, spotify
+    kind: str = "audio"  # audio, video, camera, text, fade, control, wait, group, memo, osc, light, console, spotify
     file: str = ""
     fade_in: float = 0.0  # seconds
     fade_out: float = 0.0
@@ -46,6 +46,8 @@ class Cue:
     text: str = ""  # text cues: what to show; memo cues: notes
     font_size: int = 96  # text cues: point size on the display
     parent: str = ""  # the number of the group cue this cue belongs to
+    universe: int = 0  # light cues: the Art-Net universe
+    colour: str = ""  # a hex colour shown on the cue's row, e.g. "#2980b9"; empty for none
     pre_wait_ms: int = 0  # wait this long after GO before the cue starts
     post_wait_ms: int = 0  # follow cues: wait this long after the cue ends before the next one starts
 
