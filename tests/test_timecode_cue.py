@@ -52,3 +52,20 @@ def test_first_message_is_a_full_frame_at_the_start_time(window):
     first = port.send.call_args_list[0].args[0]
     assert first.type == "sysex"
     assert list(first.data)[-4:] == [32, 0, 10, 0]  # hour byte carries the 25 fps code (1 << 5); then mm ss ff
+
+
+def test_incoming_timecode_fires_the_cue_it_passes(window):
+    from cuerunner.model import Cue
+
+    window.show_model.cues.extend([
+        Cue(number="1", name="early", kind="memo"),
+        Cue(number="2", name="at five", kind="memo", trigger_tc="00:00:05:00"),
+    ])
+    window._refresh_table()
+    with mock.patch.object(window, "go_row") as go_row:
+        window._tc_queue.put((0, 25))
+        window._poll_timecode()
+        assert go_row.call_count == 0
+        window._tc_queue.put((5_100, 25))  # 5.1 s: passes 00:00:05:00 at 25 fps
+        window._poll_timecode()
+        go_row.assert_called_once_with(1)

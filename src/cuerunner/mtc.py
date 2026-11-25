@@ -123,3 +123,98 @@ class MtcGenerator:
         if self._piece == 8:
             self._piece = 0
             self._elapsed_frames += 2
+
+
+# --- Receiving: timecode triggers cue lists ----------------------------------
+
+class QuarterFrameDecoder:
+    """Rebuilds the running clock from incoming MTC.
+
+    feed() takes one raw MIDI message as bytes. It returns (ms, fps) when a position is
+    known: after a full-frame SysEx, or after each complete set of eight quarter-frames.
+    Other messages return None.
+    """
+
+    def __init__(self) -> None:
+        self._pieces = [0] * 8
+        self._seen = 0
+
+    def feed(self, data: bytes) -> tuple[int, int] | None:
+        if len(data) == 10 and data[:5] == bytes([0xF0, 0x7F, 0x7F, 0x01, 0x01]):
+            hour_byte, minutes, seconds, frames = data[5], data[6], data[7], data[8]
+            fps = {code: rate for rate, code in RATE_CODES.items()}.get(hour_byte >> 5)
+            if fps is None:
+                return None
+            hours = hour_byte & 0x1F
+            self._seen = 0
+            return _to_ms(hours, minutes, seconds, frames, fps), fps
+        if len(data) == 2 and data[0] == 0xF1:
+            piece, nibble = data[1] >> 4, data[1] & 0x0F
+            if piece != self._seen:
+                self._seen = 0  # out of step: wait for piece 0 again
+                if piece != 0:
+                    return None
+            self._pieces[piece] = nibble
+            self._seen = piece + 1
+            if piece == 7:
+                self._seen = 0
+                return self._from_pieces()
+        return None
+
+    def _from_pieces(self) -> tuple[int, int] | None:
+        p = self._pieces
+        frames = p[0] | (p[1] << 4)
+        seconds = p[2] | (p[3] << 4)
+        minutes = p[4] | (p[5] << 4)
+        hours = p[6] | ((p[7] & 0x01) << 4)
+        fps = {code: rate for rate, code in RATE_CODES.items()}.get((p[7] >> 1) & 0x03)
+        if fps is None:
+            return None
+        return _to_ms(hours, minutes, seconds, frames, fps), fps
+
+
+def _to_ms(hours: int, minutes: int, seconds: int, frames: int, fps: int) -> int:
+    total = ((hours * 60 + minutes) * 60 + seconds) * fps + frames
+    return round(total * 1000 / fps)
+
+
+class TimecodeTriggers:
+    """Cues that fire when incoming timecode passes their time.
+
+    Triggers fire only when the clock moves forward past them. A rewind or a locate
+    re-arms them without firing, so a cue fires again when the clock next passes its time.
+    """
+
+    def __init__(self) -> None:
+        self._items: list[tuple[int, object]] = []
+        self._last: int | None = None
+
+    def set_items(self, items: list[tuple[int, object]]) -> None:
+        """items: (trigger ms, key). Keeps the clock position so nothing re-fires."""
+        self._items = sorted(items, key=lambda item: item[0])
+
+    def advance(self, position_ms: int) -> list[object]:
+        fired: list[object] = []
+        if self._last is not None and position_ms > self._last:
+            fired = [key for ms, key in self._items if self._last < ms <= position_ms]
+        self._last = position_ms
+        return fired
+
+
+class TimecodeInput:
+    """Listens on a MIDI input port and reports each position to on_position(ms, fps)."""
+
+    def __init__(self, port_name: str, on_position) -> None:
+        import mido
+
+        self._decoder = QuarterFrameDecoder()
+        self._on_position = on_position
+        self._port = mido.open_input(port_name, callback=self._callback)
+
+    def _callback(self, message) -> None:
+        result = self._decoder.feed(bytes(message.bytes()))
+        if result is not None:
+            self._on_position(*result)
+
+    def close(self) -> None:
+        self._port.close()

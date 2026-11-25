@@ -313,6 +313,9 @@ class CueDialog(QDialog):
         self.post_wait_spin.setSuffix(" s")
         self.post_wait_spin.setValue(cue.post_wait_ms / 1000)
         form.addRow("Post-wait", self.post_wait_spin)
+        self.trigger_tc_edit = QLineEdit(cue.trigger_tc)
+        self.trigger_tc_edit.setPlaceholderText("Blank for none, e.g. 00:01:30:00")
+        form.addRow("Timecode trigger", self.trigger_tc_edit)
         self.target_edit = QLineEdit(cue.target)
         self.target_edit.setPlaceholderText("Cue number, e.g. 3")
         self.action_box = QComboBox()
@@ -452,6 +455,7 @@ class CueDialog(QDialog):
         cue.parent = self.parent_box.currentData() or ""
         cue.pre_wait_ms = int(self.pre_wait_spin.value() * 1000)
         cue.post_wait_ms = int(self.post_wait_spin.value() * 1000)
+        cue.trigger_tc = self.trigger_tc_edit.text().strip()
         cue.colour = self.colour_box.currentData() or ""
         if cue.kind in ("control", "fade"):
             cue.target = self.target_edit.text().strip()
@@ -575,6 +579,9 @@ class MainWindow(QMainWindow):
         self._remote_state: RemoteState | None = None
         self._midi: MidiInput | None = None
         self._midi_commands: queue.Queue[str] = queue.Queue()
+        self._tc_listen: mtc.TimecodeInput | None = None  # incoming MIDI Timecode
+        self._tc_queue: queue.Queue[tuple[int, int]] = queue.Queue()  # (ms, fps) from the MIDI thread
+        self._tc_triggers = mtc.TimecodeTriggers()
         self._spotify: spotify.SpotifyClient | None = None
         self._spotify_playing = False
         self._console: allenheath.MidiTcpSender | None = None
@@ -860,6 +867,9 @@ class MainWindow(QMainWindow):
         midi.addAction("Stop Input", self.stop_midi)
         midi.addSeparator()
         midi.addAction("Mapping...", self.edit_midi_mapping)
+        timecode = control_menu.addMenu("Timecode")
+        timecode.addAction("Listen for Timecode...", self.start_timecode_listen)
+        timecode.addAction("Stop Listening", self.stop_timecode_listen)
         control_menu.addSeparator()
         control_menu.addAction("Allen & Heath Console...", self.open_console)
         control_menu.addAction("Spotify...", self.open_spotify)
@@ -1822,6 +1832,7 @@ class MainWindow(QMainWindow):
         self._remote_tick()
         while not self._midi_commands.empty():
             self._run_command(self._midi_commands.get_nowait())
+        self._poll_timecode()
         if self._mic_chain is not None and self.mixer is not None:
             self.mixer.set_ducked(self._mic_chain.gate_open, self.show_model.duck_level)
         self._update_clock()
@@ -1920,6 +1931,56 @@ class MainWindow(QMainWindow):
             self._midi = MidiInput(name, self._midi_commands.put, mapping=self.show_model.midi_map)
         except Exception as exc:
             QMessageBox.critical(self, "MIDI", f"Could not open that MIDI port:\n{exc}")
+
+    def start_timecode_listen(self) -> None:
+        """Pick the MIDI input that carries timecode. Cues with a timecode trigger then fire as it passes them."""
+        try:
+            import mido
+
+            ports = mido.get_input_names()
+        except Exception as exc:
+            QMessageBox.critical(self, "Timecode", f"Could not list MIDI inputs:\n{exc}")
+            return
+        if not ports:
+            QMessageBox.information(self, "Timecode", "No MIDI input ports were found.")
+            return
+        name, ok = QInputDialog.getItem(self, "Timecode input", "Choose the MIDI port that sends timecode:", ports, 0, False)
+        if not ok:
+            return
+        self.stop_timecode_listen()
+        try:
+            self._tc_listen = mtc.TimecodeInput(name, lambda ms, fps: self._tc_queue.put((ms, fps)))
+        except Exception as exc:
+            QMessageBox.critical(self, "Timecode", f"Could not open that MIDI port:\n{exc}")
+
+    def stop_timecode_listen(self) -> None:
+        if self._tc_listen is not None:
+            self._tc_listen.close()
+            self._tc_listen = None
+        self._tc_triggers.set_items([])
+        while not self._tc_queue.empty():
+            self._tc_queue.get_nowait()
+
+    def _poll_timecode(self) -> None:
+        """Runs on the window's timer: fires cues whose timecode trigger the clock has just passed."""
+        while not self._tc_queue.empty():
+            ms, fps = self._tc_queue.get_nowait()
+            self._tc_triggers.set_items(self._timecode_trigger_items(fps))
+            for number in self._tc_triggers.advance(ms):
+                row = next((i for i, c in enumerate(self.show_model.cues) if c.number == number), None)
+                if row is not None:
+                    self.go_row(row)
+
+    def _timecode_trigger_items(self, fps: int) -> list[tuple[int, str]]:
+        items = []
+        for cue in self.show_model.cues:
+            if not cue.trigger_tc:
+                continue
+            try:
+                items.append((mtc.parse_timecode(cue.trigger_tc, fps), cue.number))
+            except ValueError:
+                continue  # a bad trigger is ignored; the cue dialog shows the format
+        return items
 
     def edit_midi_mapping(self) -> None:
         dialog = MidiMappingDialog(self.show_model.midi_map, self)
