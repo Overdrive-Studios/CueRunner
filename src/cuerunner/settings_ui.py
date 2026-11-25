@@ -34,6 +34,7 @@ from cuerunner.model import Show
 
 REMOTE_PORT_RANGE = (1024, 65535)
 LABEL_WIDTH = 230
+NOTE_MIN_WIDTH = 220
 
 # Shortcut rows: (row label, button text, key the main window passes in).
 DEVICE_ACTIONS = [
@@ -157,6 +158,7 @@ def _row(label: str, control: QWidget, note: str = "") -> QWidget:
         text = QLabel(note)
         text.setObjectName("rowNote")
         text.setWordWrap(True)
+        text.setMinimumWidth(NOTE_MIN_WIDTH)  # keeps the note to a few readable lines instead of one word per line
         layout.addWidget(text, 1, Qt.AlignmentFlag.AlignTop)
     else:
         layout.addStretch(1)
@@ -495,7 +497,7 @@ class SettingsDialog(QDialog):
 
         # Spotify
         self.spotify_client_id = QLineEdit(current["spotify_client_id"])
-        self.spotify_client_id.setFixedWidth(320)
+        self.spotify_client_id.setFixedWidth(260)
         spotify = _page("Spotify", [
             _row("Spotify client ID", self.spotify_client_id,
                  "Sign in from Audio > Spotify after saving."),
