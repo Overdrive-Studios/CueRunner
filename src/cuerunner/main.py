@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QGridLayout,
+    QScrollArea,
     QStackedWidget,
     QTabBar,
     QComboBox,
@@ -78,6 +79,7 @@ from cuerunner.version import __version__
 
 BACKUP_INTERVAL_MS = 15 * 60 * 1000  # automatic show snapshot every 15 minutes
 DMX_STEP_MS = 40  # light ramps send a new frame this often
+INSPECTOR_MAX_HEIGHT = 230  # the inspector scrolls past this, so the cue list keeps its room
 INSPECTOR_TABS = ["Basics", "Triggers", "I/O", "Time & Loops", "Levels", "Objects", "Trim", "Audio FX"]
 CONTINUE_MODES = [("Do not continue", "none"), ("Auto-follow", "follow"), ("Auto-continue", "continue")]
 
@@ -1194,6 +1196,7 @@ class MainWindow(QMainWindow):
         self.table.itemSelectionChanged.connect(self._remember_selected_row)
         self.table.itemSelectionChanged.connect(self._refresh_now_label)
         self.table.itemSelectionChanged.connect(self._refresh_inspector)
+        self.table.setMinimumHeight(140)  # the cue list keeps its room; the inspector scrolls instead
         layout.addWidget(self.table, 1)
 
         # QLab-style inspector: a tab row, and the Basics form for the selected cue.
@@ -1239,7 +1242,7 @@ class MainWindow(QMainWindow):
         self.insp_target = QLineEdit()
         self.insp_target.setReadOnly(True)
         self.insp_notes = QPlainTextEdit()
-        self.insp_notes.setMinimumHeight(60)
+        self.insp_notes.setMinimumHeight(52)
         self.insp_colour = QComboBox()
         for label, value in COLOURS:
             self.insp_colour.addItem(label, value)
@@ -1413,7 +1416,16 @@ class MainWindow(QMainWindow):
         for title in INSPECTOR_TABS:
             self.insp_stack.addWidget(built_pages[title])
         self.insp_tabs.currentChanged.connect(self.insp_stack.setCurrentIndex)
-        outer.addWidget(self.insp_stack)
+        # The stack is as tall as its tallest page, so it is capped and scrolls instead of
+        # pushing the cue list off a laptop screen.
+        self.insp_scroll = QScrollArea()
+        self.insp_scroll.setWidget(self.insp_stack)
+        self.insp_scroll.setWidgetResizable(True)
+        self.insp_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.insp_scroll.setMaximumHeight(INSPECTOR_MAX_HEIGHT)
+        self.insp_scroll.setMinimumHeight(90)
+        self.insp_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer.addWidget(self.insp_scroll)
 
         # Every field that edits the selected cue, enabled together in Edit mode.
         self._insp_editable = [

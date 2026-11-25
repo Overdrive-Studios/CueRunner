@@ -144,3 +144,15 @@ def test_the_new_cue_settings_survive_saving_and_reopening(tmp_path):
     assert (cue.volume, cue.trim_in, cue.trim_out) == (0.5, 1.0, 4.0)
     assert (cue.eq_low, cue.eq_mid, cue.eq_high) == (3.0, -2.0, 1.5)
     assert cue.notes == "Check levels"
+
+
+def test_the_inspector_is_capped_so_the_cue_list_keeps_its_room(window):
+    """At the smallest window size the inspector scrolls rather than squeezing out the cues."""
+    from cuerunner.main import INSPECTOR_MAX_HEIGHT
+
+    assert window.insp_scroll.maximumHeight() == INSPECTOR_MAX_HEIGHT
+    assert window.table.minimumHeight() >= 140
+    window.resize(900, 620)
+    window.show()
+    QtWidgets.QApplication.processEvents()
+    assert window.table.height() >= 140
