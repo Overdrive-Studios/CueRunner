@@ -1381,6 +1381,14 @@ class MainWindow(QMainWindow):
         dialog.setAutoClose(False)
         dialog.setAutoReset(False)
         dialog.setMinimumWidth(420)
+        bar = dialog.findChild(QProgressBar)
+        if bar is not None:  # the app theme makes bars 8px tall, which hides the percentage
+            bar.setStyleSheet(
+                "QProgressBar { background: #1a1a1c; border: 0; border-radius: 4px; min-height: 22px;"
+                " color: #f0f0f0; text-align: center; }"
+                " QProgressBar::chunk { background: #3b82d6; border-radius: 4px; }"
+            )
+            bar.setTextVisible(True)
         dialog.setValue(0)
 
         def show_progress(value: int) -> None:
