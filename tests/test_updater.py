@@ -55,3 +55,58 @@ def test_update_requests_verify_certificates_with_certifi() -> None:
     assert context.verify_mode == ssl.CERT_REQUIRED
     assert context.check_hostname is True
     assert certifi.where()
+
+
+class _FakeResponse:
+    def __init__(self, data: bytes, length: bool = True) -> None:
+        import io
+
+        self._buf = io.BytesIO(data)
+        self.headers = {"Content-Length": str(len(data))} if length else {}
+
+    def read(self, n: int = -1) -> bytes:
+        return self._buf.read(n)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
+
+
+def test_download_reports_progress_and_returns_file(tmp_path) -> None:
+    from unittest import mock
+
+    from cuerunner import updater
+
+    dest = tmp_path / "CueRunner.dmg"
+    seen: list[int] = []
+    with mock.patch.object(updater.urllib.request, "urlopen", return_value=_FakeResponse(b"x" * 1000)):
+        result = updater.download("https://example.invalid/a", dest, progress=seen.append)
+    assert result == dest
+    assert dest.read_bytes() == b"x" * 1000
+    assert seen[-1] == 100
+
+
+def test_download_cancelled_returns_none_and_removes_partial_file(tmp_path) -> None:
+    from unittest import mock
+
+    from cuerunner import updater
+
+    dest = tmp_path / "CueRunner.dmg"
+    with mock.patch.object(updater.urllib.request, "urlopen", return_value=_FakeResponse(b"x" * 1000)):
+        result = updater.download("https://example.invalid/a", dest, cancelled=lambda: True)
+    assert result is None
+    assert not dest.exists()
+
+
+def test_download_unknown_size_reports_busy(tmp_path) -> None:
+    from unittest import mock
+
+    from cuerunner import updater
+
+    dest = tmp_path / "CueRunner.dmg"
+    seen: list[int] = []
+    with mock.patch.object(updater.urllib.request, "urlopen", return_value=_FakeResponse(b"abc", length=False)):
+        updater.download("https://example.invalid/a", dest, progress=seen.append)
+    assert seen and all(v == -1 for v in seen)

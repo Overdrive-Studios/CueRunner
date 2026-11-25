@@ -95,12 +95,13 @@ class _DownloadWorker(QThread):
 
     def run(self) -> None:
         try:
-            path = updater.download(self._url, self._dest, progress=self.progress.emit)
+            path = updater.download(
+                self._url, self._dest, progress=self.progress.emit, cancelled=self.isInterruptionRequested
+            )
         except Exception as exc:
             self.failed.emit(str(exc))
             return
-        if self.isInterruptionRequested():
-            self.failed.emit("Download cancelled.")
+        if path is None:  # cancelled by the user: nothing to report
             return
         self.done.emit(str(path))
 
@@ -1374,11 +1375,32 @@ class MainWindow(QMainWindow):
     def _download_update(self, release: updater.Release) -> None:
         dest = Path(tempfile.mkdtemp(prefix="cuerunner-dl-")) / release.asset_name
         dialog = QProgressDialog(f"Downloading CueRunner {release.tag}...", "Cancel", 0, 100, self)
+        dialog.setWindowTitle("Update CueRunner")
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setMinimumWidth(420)
+        bar = dialog.findChild(QProgressBar)
+        if bar is not None:  # the app theme makes bars 8px tall, which hides the percentage
+            bar.setStyleSheet(
+                "QProgressBar { background: #1a1a1c; border: 0; border-radius: 4px; min-height: 22px;"
+                " color: #f0f0f0; text-align: center; }"
+                " QProgressBar::chunk { background: #3b82d6; border-radius: 4px; }"
+            )
+            bar.setTextVisible(True)
+        dialog.setValue(0)
+
+        def show_progress(value: int) -> None:
+            if value < 0:  # size unknown: show a busy bar instead of a stuck one
+                dialog.setRange(0, 0)
+            else:
+                if dialog.maximum() == 0:
+                    dialog.setRange(0, 100)
+                dialog.setValue(value)
 
         worker = _DownloadWorker(release.asset_url, dest, self)
-        worker.progress.connect(dialog.setValue)
+        worker.progress.connect(show_progress)
         worker.failed.connect(lambda msg: (dialog.close(), QMessageBox.critical(self, "Update failed", msg)))
 
         def finished(path: str) -> None:
@@ -1388,6 +1410,9 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 QMessageBox.critical(self, "Update failed", str(exc))
                 return
+            QMessageBox.information(
+                self, "Update ready", "CueRunner will close and reopen to finish the update."
+            )
             QApplication.quit()
 
         worker.done.connect(finished)
