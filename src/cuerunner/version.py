@@ -1,4 +1,4 @@
 """App version and where to find releases. Bump __version__ with each tagged release."""
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 REPO = "Overdrive-Studios/CueRunner"
