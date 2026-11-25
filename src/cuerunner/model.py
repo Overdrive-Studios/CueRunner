@@ -57,6 +57,11 @@ class Cue:
     trigger_tc: str = ""  # HH:MM:SS:FF; fires when incoming timecode passes it (empty for none)
     fps: int = 30  # timecode cues: MIDI Timecode frame rate (24, 25 or 30)
     volume: float = 1.0  # Levels tab: the cue's own level, 0 to about 4 (0 dB = 1.0)
+    effects: list = field(default_factory=list)  # Audio FX: the chain, in order
+    rate: float = 1.0  # Time & Loops: playback speed; 1.0 is normal
+    integrated_fade: bool = False  # Time & Loops: shape the cue's fades with the curve below
+    fade_curve: str = "linear"  # "linear" or "smooth"
+    slices: list = field(default_factory=list)  # Time & Loops: slice points in seconds
     patch: str = ""  # I/O tab: the audio patch this cue plays out of (empty = the first one)
     output_levels: list = field(default_factory=list)  # Levels tab: per output level in dB
     output_mutes: list = field(default_factory=list)  # Levels tab: per output mute

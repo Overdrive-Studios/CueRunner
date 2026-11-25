@@ -120,3 +120,11 @@ def test_the_time_scale_uses_round_numbers(app, wav):
     assert view.tick_seconds() in (1.0, 2.0, 5.0)  # a round step for a four second file
     assert waveform.WaveformView.label_for(0) == "0:00"
     assert waveform.WaveformView.label_for(95) == "1:35"
+
+
+def test_slices_are_drawn_without_disturbing_the_loop(app, wav):
+    view = ready_view(wav)
+    view.set_markers(1.0, 3.0)
+    view.set_slices([0.5, 2.0])
+    view.grab()  # drawing must not raise
+    assert view.markers() == (1.0, 3.0)

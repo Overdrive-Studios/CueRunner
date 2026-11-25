@@ -28,6 +28,9 @@ class Band:
     q: float = 0.707
 
     def flat(self) -> bool:
+        """A filter always does something; a shelf or peak at 0 dB does not."""
+        if self.kind in FILTER_KINDS:
+            return False
         return abs(self.gain_db) < FLAT_DB
 
 
@@ -38,7 +41,13 @@ def _biquad(band: Band, rate: int) -> np.ndarray:
     w0 = 2 * np.pi * freq / rate
     cos_w0, sin_w0 = np.cos(w0), np.sin(w0)
     alpha = sin_w0 / (2 * max(band.q, 0.05))
-    if band.kind == "peaking":
+    if band.kind in ("highpass", "lowpass"):
+        # Filters cut rather than boost, so their gain setting is not used.
+        cos_plus = (1 + cos_w0) if band.kind == "highpass" else (1 - cos_w0)
+        sign = -1 if band.kind == "highpass" else 1
+        b = [cos_plus / 2, sign * cos_plus, cos_plus / 2]
+        a = [1 + alpha, -2 * cos_w0, 1 - alpha]
+    elif band.kind == "peaking":
         b = [1 + alpha * amp, -2 * cos_w0, 1 - alpha * amp]
         a = [1 + alpha / amp, -2 * cos_w0, 1 - alpha / amp]
     elif band.kind in ("lowshelf", "highshelf"):
@@ -60,6 +69,42 @@ def _biquad(band: Band, rate: int) -> np.ndarray:
         raise ValueError(f"unknown band type: {band.kind}")
     section = np.array([b[0], b[1], b[2], a[0], a[1], a[2]], dtype=np.float64)
     return section / a[0]
+
+
+# What the Audio FX tab offers, with sensible starting values for each.
+EFFECT_TYPES = [
+    ("Low shelf", "lowshelf", 120.0),
+    ("Peaking EQ", "peaking", 1000.0),
+    ("High shelf", "highshelf", 6000.0),
+    ("High pass", "highpass", 80.0),
+    ("Low pass", "lowpass", 12000.0),
+]
+FILTER_KINDS = ("highpass", "lowpass")  # these cut by frequency; gain does not apply
+
+
+def effect_label(kind: str) -> str:
+    return next((label for label, value, _ in EFFECT_TYPES if value == kind), kind)
+
+
+def new_effect(kind: str) -> dict:
+    freq = next((f for _, value, f in EFFECT_TYPES if value == kind), 1000.0)
+    return {"kind": kind, "freq": freq, "gain_db": 0.0, "q": 0.707}
+
+
+def bands_from(effects: list) -> list[Band]:
+    """Turn a cue's saved effect list into bands the chain can use."""
+    bands = []
+    for effect in effects or []:
+        kind = str(effect.get("kind", ""))
+        if kind not in {value for _, value, _ in EFFECT_TYPES}:
+            continue
+        bands.append(Band(
+            kind=kind,
+            freq=float(effect.get("freq", 1000.0)),
+            gain_db=float(effect.get("gain_db", 0.0)),
+            q=float(effect.get("q", 0.707)),
+        ))
+    return bands
 
 
 def default_bands() -> list[Band]:
