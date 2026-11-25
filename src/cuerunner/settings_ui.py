@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -19,6 +21,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -75,6 +80,24 @@ QPushButton#cancelButton {
     background: #3a3a3e; color: #f0f0f0; border: 1px solid #4a4a4f; border-radius: 5px;
     padding: 7px 18px; font-size: 14px;
 }
+QTabWidget#videoTabs::pane { border: 0; border-top: 1px solid #3a3a3e; background: #2b2b2e; }
+QTabWidget#videoTabs QTabBar::tab {
+    background: #232326; color: #c8c8cc; border: 1px solid #1c1c1e; padding: 7px 16px; font-size: 13px;
+}
+QTabWidget#videoTabs QTabBar::tab:selected { background: #3a3a3e; color: #ffffff; }
+QTableWidget#videoTable {
+    background: #1a1a1c; color: #f0f0f0; border: 1px solid #3a3a3e; gridline-color: #3a3a3e;
+    font-size: 13px; selection-background-color: #3a3a3e;
+}
+QTableWidget#videoTable QHeaderView::section {
+    background: #3a3a3e; color: #e8e8ea; border: 0; border-right: 1px solid #2b2b2e; padding: 6px 8px;
+    font-size: 13px;
+}
+QTableWidget#videoTable QHeaderView { background: #2b2b2e; border: 0; }
+QTableWidget#videoTable QHeaderView::section:vertical {
+    background: #2b2b2e; color: #e8e8ea; border: 0; border-right: 1px solid #3a3a3e; padding: 6px 8px;
+}
+QTableWidget#videoTable QTableCornerButton::section { background: #3a3a3e; border: 0; }
 """
 
 
@@ -157,6 +180,94 @@ def _button_column(actions: dict, specs: list[tuple[str, str, str]]) -> list[QWi
     return rows
 
 
+def _table(headers: list[str], rows: list[list[str]], row_labels: list[str] | None = None) -> QTableWidget:
+    """A read-only table in the QLab style: column headers, optional 'Device 1:' row labels."""
+    table = QTableWidget(len(rows), len(headers))
+    table.setObjectName("videoTable")
+    table.setHorizontalHeaderLabels(headers)
+    for r, values in enumerate(rows):
+        for c, text in enumerate(values):
+            item = QTableWidgetItem(text)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            table.setItem(r, c, item)
+    if row_labels:
+        table.setVerticalHeaderLabels(row_labels)
+    else:
+        table.verticalHeader().setVisible(False)
+    table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+    table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    table.setShowGrid(False)
+    header = table.horizontalHeader()
+    header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+    header.setStretchLastSection(True)
+    table.setMinimumHeight(200)
+    return table
+
+
+def _note(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName("rowNote")
+    label.setWordWrap(True)
+    return label
+
+
+def _video_page(default_combo: QComboBox, devices: list[tuple[str, str, str]]) -> QWidget:
+    """The Video page, laid out like QLab's: four tabs, with the same names and order."""
+    tabs = QTabWidget()
+    tabs.setObjectName("videoTabs")
+
+    # Video Outputs: which display every video cue uses unless it picks its own.
+    outputs = QWidget()
+    out_layout = QVBoxLayout(outputs)
+    out_layout.setContentsMargins(16, 16, 16, 16)
+    out_layout.setSpacing(10)
+    row = QHBoxLayout()
+    label = QLabel("Video output for all cues:")
+    label.setObjectName("rowLabel")
+    row.addWidget(label)
+    row.addWidget(default_combo)
+    row.addStretch(1)
+    out_layout.addLayout(row)
+    out_layout.addWidget(_note("Each video cue can pick a different display in its own settings."))
+    out_layout.addStretch(1)
+
+    # Output Routing: QLab sends stage regions to displays. CueRunner has no stages yet.
+    routing = QWidget()
+    route_layout = QVBoxLayout(routing)
+    route_layout.setContentsMargins(16, 16, 16, 16)
+    route_layout.setSpacing(10)
+    route_layout.addWidget(_table(["Route Name", "Route Resolution", "Device"], []))
+    route_layout.addWidget(_note("Not available yet. Video cues play full screen on one display."))
+
+    # Output Devices: the displays this computer can see right now.
+    devices_page = QWidget()
+    dev_layout = QVBoxLayout(devices_page)
+    dev_layout.setContentsMargins(16, 16, 16, 16)
+    dev_layout.setSpacing(10)
+    if devices:
+        rows = [[name, res, info] for name, res, info in devices]
+        labels = [f"Device {i + 1}:" for i in range(len(devices))]
+        dev_layout.addWidget(_table(["Device Name", "Device Resolution", "Info"], rows, labels))
+    else:
+        dev_layout.addWidget(_table(["Device Name", "Device Resolution", "Info"], []))
+        dev_layout.addWidget(_note("No displays found."))
+    dev_layout.addWidget(_note("Displays are the physical video outputs your computer can see."))
+
+    # Video Inputs: cameras and network sources. Not supported yet.
+    inputs = QWidget()
+    in_layout = QVBoxLayout(inputs)
+    in_layout.setContentsMargins(16, 16, 16, 16)
+    in_layout.setSpacing(10)
+    in_layout.addWidget(_table(["Name", "Device", "Info"], []))
+    in_layout.addWidget(_note("Not available yet. Network video sources (NDI) will appear here."))
+
+    tabs.addTab(outputs, "Video Outputs")
+    tabs.addTab(routing, "Output Routing")
+    tabs.addTab(devices_page, "Output Devices")
+    tabs.addTab(inputs, "Video Inputs")
+    return tabs
+
+
 class SettingsDialog(QDialog):
     def __init__(self, show: Show, parent=None, actions: dict | None = None) -> None:
         super().__init__(parent)
@@ -214,12 +325,7 @@ class SettingsDialog(QDialog):
             self.video_default.addItem("No displays found", "")
         index = self.video_default.findData(current["video_default_output"])
         self.video_default.setCurrentIndex(max(0, index))
-        video = _page("Video", [
-            _row("Default display", self.video_default,
-                 "New video cues start on this display. Each cue can still pick its own."),
-            _row("Connected displays", QLabel("\n".join(displays) if displays else "None found"),
-                 "Displays are numbered in the order your computer lists them."),
-        ])
+        video = _video_page(self.video_default, video_out.display_details())
 
         # Spotify
         self.spotify_client_id = QLineEdit(current["spotify_client_id"])

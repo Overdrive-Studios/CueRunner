@@ -28,13 +28,33 @@ def screen_index(output: str) -> int | None:
         return None
 
 
+def _device_name(index: int, screen) -> str:
+    """The system's name for the display, or a numbered fallback if it has none."""
+    return screen.name() or f"Display {index + 1}"
+
+
 def display_names() -> list[str]:
     """One label per connected display, in the same order screen_output() uses."""
     names = []
     for i, screen in enumerate(QGuiApplication.screens()):
         size = screen.size()
-        names.append(f"Display {i + 1}: {screen.name()} ({size.width()}×{size.height()})")
+        names.append(f"Display {i + 1}: {_device_name(i, screen)} ({size.width()}×{size.height()})")
     return names
+
+
+def display_details() -> list[tuple[str, str, str]]:
+    """(device name, resolution, info) for each connected display, in screen_output() order."""
+    rows = []
+    primary = QGuiApplication.primaryScreen()
+    for i, screen in enumerate(QGuiApplication.screens()):
+        size = screen.size()
+        info = []
+        if screen.refreshRate():
+            info.append(f"{screen.refreshRate():.0f} fps")
+        if screen is primary:
+            info.append("Main display")
+        rows.append((_device_name(i, screen), f"{size.width()} × {size.height()}", ", ".join(info)))
+    return rows
 
 
 class _Output:
