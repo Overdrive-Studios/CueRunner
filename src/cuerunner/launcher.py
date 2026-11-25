@@ -28,7 +28,7 @@ from cuerunner.version import __version__
 RECENT_LIMIT = 8
 DOCS_URL = "https://overdrive-studios.github.io/CueRunner/"
 HELP_URL = "https://overdrive-studios.github.io/CueRunner/help.html"
-ISSUES_URL = "https://github.com/Overdrive-Studios/CueRunner/issues"
+REPORT_URL = "https://overdrive-studios.github.io/CueRunner/report.html"
 ICON_PATH = Path(__file__).resolve().parents[2] / "assets" / "icon.png"
 
 LAUNCH_QSS = """
@@ -202,7 +202,7 @@ class LaunchDialog(QDialog):
             ("Check for Updates  →", lambda: on_updates()),
             ("Documentation  →", lambda: self._open_url(DOCS_URL)),
             ("Help  →", lambda: self._open_url(HELP_URL)),
-            ("Report a Problem  →", lambda: self._open_url(ISSUES_URL)),
+            ("Report a Problem  →", lambda: self._open_url(REPORT_URL)),
             ("About CueRunner  →", lambda: on_about()),
         ]:
             link = QPushButton(label)
