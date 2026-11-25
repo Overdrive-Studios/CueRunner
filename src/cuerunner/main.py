@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cuerunner import allenheath, artnet, console_ui, launcher, midi, netsend, osc, sacn, settings_ui, spotify, spotify_ui, updater, video_out
+from cuerunner import allenheath, artnet, console_ui, launcher, midi, mtc, netsend, osc, sacn, settings_ui, spotify, spotify_ui, updater, video_out
 from cuerunner.devices import DeviceInfo, label as devices_label
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
@@ -135,6 +135,7 @@ SPECIAL_KINDS = {
     "mic": "Mic",
     "network": "Network",
     "midi": "MIDI",
+    "timecode": "Timecode",
     "light": "Light",
     "osc": "OSC",
     "text": "Text",
@@ -273,7 +274,7 @@ class CueDialog(QDialog):
         self.route_button.clicked.connect(self._edit_routing)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._accept_checked)
         buttons.rejected.connect(self.reject)
 
         form = QFormLayout(self)
@@ -312,6 +313,9 @@ class CueDialog(QDialog):
         self.post_wait_spin.setSuffix(" s")
         self.post_wait_spin.setValue(cue.post_wait_ms / 1000)
         form.addRow("Post-wait", self.post_wait_spin)
+        self.trigger_tc_edit = QLineEdit(cue.trigger_tc)
+        self.trigger_tc_edit.setPlaceholderText("Blank for none, e.g. 00:01:30:00")
+        form.addRow("Timecode trigger", self.trigger_tc_edit)
         self.target_edit = QLineEdit(cue.target)
         self.target_edit.setPlaceholderText("Cue number, e.g. 3")
         self.action_box = QComboBox()
@@ -365,7 +369,7 @@ class CueDialog(QDialog):
         if kind == "osc":
             form.addRow("Send to", self.osc_target_edit)
             form.addRow("Message", self.osc_message_edit)
-        if kind == "midi":
+        if kind in ("midi", "timecode"):
             self.midi_port_box = QComboBox()
             try:
                 ports = midi.output_port_names()
@@ -377,7 +381,16 @@ class CueDialog(QDialog):
                 self.midi_port_box.addItem(f"{cue.target} (not connected)", cue.target)
             self.midi_port_box.setCurrentIndex(max(0, self.midi_port_box.findData(cue.target)))
             form.addRow("MIDI port", self.midi_port_box)
-            form.addRow("Message", self.osc_message_edit)
+            if kind == "midi":
+                form.addRow("Message", self.osc_message_edit)
+            else:
+                self.timecode_start_edit = QLineEdit(cue.text or "00:00:00:00")
+                self.fps_box = QComboBox()
+                for rate in mtc.FRAME_RATES:
+                    self.fps_box.addItem(f"{rate} fps", rate)
+                self.fps_box.setCurrentIndex(max(0, self.fps_box.findData(cue.fps)))
+                form.addRow("Start at", self.timecode_start_edit)
+                form.addRow("Frame rate", self.fps_box)
         if kind in ("light", "network"):
             self.protocol_box = QComboBox()
             options = [("Art-Net", "artnet"), ("sACN", "sacn")] if kind == "light" else [("UDP", "udp"), ("TCP", "tcp")]
@@ -429,6 +442,17 @@ class CueDialog(QDialog):
         spin.setValue(value)
         return spin
 
+    def _accept_checked(self) -> None:
+        """OK, but only when the timecode trigger is blank or a valid HH:MM:SS:FF."""
+        text = self.trigger_tc_edit.text().strip() if hasattr(self, "trigger_tc_edit") else ""
+        if text:
+            try:
+                mtc.parse_timecode(text, 24)  # 24 is the strictest rate, so a value that passes here is valid at 25 and 30 too
+            except ValueError as exc:
+                QMessageBox.warning(self, "Timecode trigger", f"{exc}\n\nExample: 00:01:30:00")
+                return
+        self.accept()
+
     def apply_to(self, cue: Cue) -> None:
         cue.name = self.name_edit.text().strip() or cue.name
         cue.fade_in = self.fade_in.value()
@@ -442,12 +466,17 @@ class CueDialog(QDialog):
         cue.parent = self.parent_box.currentData() or ""
         cue.pre_wait_ms = int(self.pre_wait_spin.value() * 1000)
         cue.post_wait_ms = int(self.post_wait_spin.value() * 1000)
+        cue.trigger_tc = self.trigger_tc_edit.text().strip()
         cue.colour = self.colour_box.currentData() or ""
         if cue.kind in ("control", "fade"):
             cue.target = self.target_edit.text().strip()
         if cue.kind == "midi":
             cue.target = self.midi_port_box.currentData() or ""
             cue.text = self.osc_message_edit.text().strip()
+        if cue.kind == "timecode":
+            cue.target = self.midi_port_box.currentData() or ""
+            cue.text = self.timecode_start_edit.text().strip() or "00:00:00:00"
+            cue.fps = self.fps_box.currentData() or 30
         if cue.kind in ("light", "network"):
             cue.protocol = self.protocol_box.currentData()
         if cue.kind in ("osc", "light", "network"):
@@ -539,6 +568,7 @@ class MainWindow(QMainWindow):
         self._clips: dict[str, Clip] = {}
         self._cue_voices: list[Voice] = []
         self._timers: list[QTimer] = []
+        self._timecode_runs: dict[int, tuple] = {}  # id(cue) -> (cue, generator, timer, port)
         self._dmx_last: dict[tuple[str, int], dict[int, int]] = {}
         self._video = video_out.VideoOutputs(self)
         self._playing_cue: Cue | None = None
@@ -560,6 +590,9 @@ class MainWindow(QMainWindow):
         self._remote_state: RemoteState | None = None
         self._midi: MidiInput | None = None
         self._midi_commands: queue.Queue[str] = queue.Queue()
+        self._tc_listen: mtc.TimecodeInput | None = None  # incoming MIDI Timecode
+        self._tc_queue: queue.Queue[tuple[int, int]] = queue.Queue()  # (ms, fps) from the MIDI thread
+        self._tc_triggers = mtc.TimecodeTriggers()
         self._spotify: spotify.SpotifyClient | None = None
         self._spotify_playing = False
         self._console: allenheath.MidiTcpSender | None = None
@@ -588,6 +621,7 @@ class MainWindow(QMainWindow):
         self._fit_to_screen()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        self._stop_timecode()
         self._video.close()
         super().closeEvent(event)
 
@@ -698,9 +732,29 @@ class MainWindow(QMainWindow):
     def _refresh_inspector(self) -> None:
         if not hasattr(self, "inspector_label"):
             return
-        row = self.table.currentRow()
+        row = self._selected_row()
         cues = self.show_model.cues
-        if not 0 <= row < len(cues):
+        has_cue = 0 <= row < len(cues)
+        editable = has_cue and self._editing
+        self._insp_busy = True
+        try:
+            for widget in (self.insp_name, self.insp_pre, self.insp_post,
+                           self.insp_colour, self.insp_hotkey):
+                widget.setEnabled(editable)
+            self.insp_full_edit.setEnabled(editable)
+            if not has_cue:
+                self.insp_name.clear()
+            else:
+                cue = cues[row]
+                self.insp_name.setText(cue.name)
+                self.insp_pre.setValue(cue.pre_wait_ms / 1000)
+                self.insp_post.setValue(cue.post_wait_ms / 1000)
+                index = self.insp_colour.findData(cue.colour or "")
+                self.insp_colour.setCurrentIndex(max(index, 0))
+                self.insp_hotkey.setKeySequence(QKeySequence(cue.hotkey))
+        finally:
+            self._insp_busy = False
+        if not has_cue:
             self.inspector_label.setText("No cue selected")
             return
         cue = cues[row]
@@ -719,6 +773,26 @@ class MainWindow(QMainWindow):
             parts.append(f"In group {cue.parent}")
         self.inspector_label.setText("  •  ".join(part for part in parts if part))
 
+    def _inspector_apply(self) -> None:
+        """Write the inspector fields back to the selected cue (Edit mode only)."""
+        if self._insp_busy or not self._editing:
+            return
+        row = self._selected_row()
+        cues = self.show_model.cues
+        if not 0 <= row < len(cues):
+            return
+        cue = cues[row]
+        name = self.insp_name.text().strip()
+        if name:
+            cue.name = name
+        cue.pre_wait_ms = int(self.insp_pre.value() * 1000)
+        cue.post_wait_ms = int(self.insp_post.value() * 1000)
+        cue.colour = self.insp_colour.currentData() or ""
+        cue.hotkey = self.insp_hotkey.keySequence().toString()
+        self._refresh_table()
+        self._rebuild_shortcuts()
+        self.table.selectRow(row)
+
     def _target_text(self, cue: Cue) -> str:
         """What the File column shows for each cue type."""
         if cue.kind == "control":
@@ -731,6 +805,8 @@ class MainWindow(QMainWindow):
             return f"{cue.text} to {cue.target}"
         if cue.kind == "midi":
             return f"{cue.text} to {cue.target or 'no port'}"
+        if cue.kind == "timecode":
+            return f"Start {cue.text or '00:00:00:00'} at {cue.fps} fps to {cue.target or 'no port'}"
         if cue.kind == "network":
             return f"{cue.protocol.upper()} {cue.text} to {cue.target}"
         if cue.kind == "mic":
@@ -802,6 +878,9 @@ class MainWindow(QMainWindow):
         midi.addAction("Stop Input", self.stop_midi)
         midi.addSeparator()
         midi.addAction("Mapping...", self.edit_midi_mapping)
+        timecode = control_menu.addMenu("Timecode")
+        timecode.addAction("Listen for Timecode...", self.start_timecode_listen)
+        timecode.addAction("Stop Listening", self.stop_timecode_listen)
         control_menu.addSeparator()
         control_menu.addAction("Allen & Heath Console...", self.open_console)
         control_menu.addAction("Spotify...", self.open_spotify)
@@ -930,6 +1009,42 @@ class MainWindow(QMainWindow):
         self.inspector_label.setWordWrap(True)
         layout.addWidget(self.inspector_label)
 
+        # Editable fields for the selected cue. They apply straight away in Edit mode;
+        # Full Edit opens the complete cue dialog for everything else.
+        self._insp_busy = False
+        self.inspector_bar = QFrame()
+        self.inspector_bar.setObjectName("inspectorBar")
+        bar = QHBoxLayout(self.inspector_bar)
+        bar.setContentsMargins(8, 4, 8, 4)
+        self.insp_name = QLineEdit()
+        self.insp_name.setMinimumWidth(160)
+        self.insp_pre = QDoubleSpinBox()
+        self.insp_post = QDoubleSpinBox()
+        for spin in (self.insp_pre, self.insp_post):
+            spin.setRange(0, 3600)
+            spin.setDecimals(1)
+            spin.setSuffix(" s")
+            spin.setMaximumWidth(100)
+        self.insp_colour = QComboBox()
+        for label, value in COLOURS:
+            self.insp_colour.addItem(label, value)
+        self.insp_hotkey = QKeySequenceEdit()
+        self.insp_hotkey.setMaximumWidth(160)
+        self.insp_full_edit = QPushButton("Full Edit…")
+        for caption, widget in [("Name", self.insp_name), ("Pre-wait", self.insp_pre),
+                                ("Post-wait", self.insp_post), ("Colour", self.insp_colour),
+                                ("Hotkey", self.insp_hotkey)]:
+            bar.addWidget(QLabel(caption))
+            bar.addWidget(widget, 1 if widget is self.insp_name else 0)
+        bar.addWidget(self.insp_full_edit)
+        self.insp_name.editingFinished.connect(self._inspector_apply)
+        self.insp_pre.valueChanged.connect(self._inspector_apply)
+        self.insp_post.valueChanged.connect(self._inspector_apply)
+        self.insp_colour.currentIndexChanged.connect(self._inspector_apply)
+        self.insp_hotkey.keySequenceChanged.connect(self._inspector_apply)
+        self.insp_full_edit.clicked.connect(self.edit_selected)
+        layout.addWidget(self.inspector_bar)
+
         bottom = QHBoxLayout()
         self.countdown = Countdown(self)
         self.soundboard = Soundboard(self)
@@ -985,6 +1100,7 @@ class MainWindow(QMainWindow):
         self._editing = editing
         self.edit_button.setChecked(editing)
         self.show_button.setChecked(not editing)
+        self._refresh_inspector()
 
     def _refresh_title(self) -> None:
         name = self.show_path.name if self.show_path else "Untitled"
@@ -1309,7 +1425,38 @@ class MainWindow(QMainWindow):
         else:
             self.go_row(target_row, replace=True)
 
+    def _start_timecode(self, cue: Cue) -> None:
+        """Start sending MIDI Timecode for this cue. It keeps running until a Stop cue or Panic."""
+        import mido
+
+        if not cue.target:
+            raise ValueError("Choose a MIDI output port for this cue.")
+        start_ms = mtc.parse_timecode(cue.text or "00:00:00:00", cue.fps)
+        self._stop_timecode(cue)
+        port = mido.open_output(cue.target)
+        gen = mtc.MtcGenerator(start_ms, cue.fps, lambda data: port.send(mido.Message.from_bytes(data)))
+        timer = QTimer(self)
+        timer.setInterval(max(1, round(gen.interval_ms)))
+        timer.timeout.connect(gen.tick)
+        self._timecode_runs[id(cue)] = (cue, gen, timer, port)
+        gen.start()
+        timer.start()
+
+    def _stop_timecode(self, cue: Cue | None = None) -> None:
+        """Stop the timecode generator for one cue, or for every cue when cue is None."""
+        for key, (owner, gen, timer, port) in list(self._timecode_runs.items()):
+            if cue is not None and owner is not cue:
+                continue
+            gen.stop()
+            timer.stop()
+            timer.deleteLater()
+            port.close()
+            del self._timecode_runs[key]
+
     def _stop_cue(self, target: Cue) -> None:
+        if target.kind == "timecode":
+            self._stop_timecode(target)
+            return
         if target.kind == "mic":
             self.stop_talkback()
             return
@@ -1507,6 +1654,13 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Cannot send MIDI cue", f"{cue.name}\n\n{exc}")
             self._finish(row)
             return
+        if cue.kind == "timecode":
+            try:
+                self._start_timecode(cue)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot start timecode", f"{cue.name}\n\n{exc}")
+            self._finish(row)
+            return
         if cue.kind == "light":
             try:
                 self._run_light(cue)
@@ -1616,6 +1770,7 @@ class MainWindow(QMainWindow):
             self.mixer.clear()
             self.mixer.paused = False
         self._cue_voices = []
+        self._stop_timecode()
         for timer in self._timers:
             timer.stop()
         self._timers = []
@@ -1688,6 +1843,7 @@ class MainWindow(QMainWindow):
         self._remote_tick()
         while not self._midi_commands.empty():
             self._run_command(self._midi_commands.get_nowait())
+        self._poll_timecode()
         if self._mic_chain is not None and self.mixer is not None:
             self.mixer.set_ducked(self._mic_chain.gate_open, self.show_model.duck_level)
         self._update_clock()
@@ -1786,6 +1942,56 @@ class MainWindow(QMainWindow):
             self._midi = MidiInput(name, self._midi_commands.put, mapping=self.show_model.midi_map)
         except Exception as exc:
             QMessageBox.critical(self, "MIDI", f"Could not open that MIDI port:\n{exc}")
+
+    def start_timecode_listen(self) -> None:
+        """Pick the MIDI input that carries timecode. Cues with a timecode trigger then fire as it passes them."""
+        try:
+            import mido
+
+            ports = mido.get_input_names()
+        except Exception as exc:
+            QMessageBox.critical(self, "Timecode", f"Could not list MIDI inputs:\n{exc}")
+            return
+        if not ports:
+            QMessageBox.information(self, "Timecode", "No MIDI input ports were found.")
+            return
+        name, ok = QInputDialog.getItem(self, "Timecode input", "Choose the MIDI port that sends timecode:", ports, 0, False)
+        if not ok:
+            return
+        self.stop_timecode_listen()
+        try:
+            self._tc_listen = mtc.TimecodeInput(name, lambda ms, fps: self._tc_queue.put((ms, fps)))
+        except Exception as exc:
+            QMessageBox.critical(self, "Timecode", f"Could not open that MIDI port:\n{exc}")
+
+    def stop_timecode_listen(self) -> None:
+        if self._tc_listen is not None:
+            self._tc_listen.close()
+            self._tc_listen = None
+        self._tc_triggers.set_items([])
+        while not self._tc_queue.empty():
+            self._tc_queue.get_nowait()
+
+    def _poll_timecode(self) -> None:
+        """Runs on the window's timer: fires cues whose timecode trigger the clock has just passed."""
+        while not self._tc_queue.empty():
+            ms, fps = self._tc_queue.get_nowait()
+            self._tc_triggers.set_items(self._timecode_trigger_items(fps))
+            for number in self._tc_triggers.advance(ms):
+                row = next((i for i, c in enumerate(self.show_model.cues) if c.number == number), None)
+                if row is not None:
+                    self.go_row(row)
+
+    def _timecode_trigger_items(self, fps: int) -> list[tuple[int, str]]:
+        items = []
+        for cue in self.show_model.cues:
+            if not cue.trigger_tc:
+                continue
+            try:
+                items.append((mtc.parse_timecode(cue.trigger_tc, fps), cue.number))
+            except ValueError:
+                continue  # a bad trigger is ignored; the cue dialog shows the format
+        return items
 
     def edit_midi_mapping(self) -> None:
         dialog = MidiMappingDialog(self.show_model.midi_map, self)

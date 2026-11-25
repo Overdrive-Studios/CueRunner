@@ -28,7 +28,7 @@ DEFAULT_REMOTE_PORT = 8080
 class Cue:
     number: str
     name: str
-    kind: str = "audio"  # audio, video, camera, text, fade, control, wait, group, memo, osc, midi, light, network, mic, console, spotify
+    kind: str = "audio"  # audio, video, camera, text, fade, control, wait, group, memo, osc, midi, timecode, light, network, mic, console, spotify
     file: str = ""
     fade_in: float = 0.0  # seconds
     fade_out: float = 0.0
@@ -49,6 +49,8 @@ class Cue:
     protocol: str = "artnet"  # light cues: "artnet" or "sacn"; network cues: "udp" or "tcp"
     group_mode: str = "all"  # group cues: "all" fires every child; "playlist" runs them one after another
     universe: int = 0  # light cues: the Art-Net universe
+    trigger_tc: str = ""  # HH:MM:SS:FF; fires when incoming timecode passes it (empty for none)
+    fps: int = 30  # timecode cues: MIDI Timecode frame rate (24, 25 or 30)
     colour: str = ""  # a hex colour shown on the cue's row, e.g. "#2980b9"; empty for none
     pre_wait_ms: int = 0  # wait this long after GO before the cue starts
     post_wait_ms: int = 0  # follow cues: wait this long after the cue ends before the next one starts
