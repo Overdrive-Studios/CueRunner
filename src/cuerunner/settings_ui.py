@@ -175,12 +175,13 @@ class SettingsDialog(QDialog):
         general = _page("General", [
             _row("Phone remote port", self.remote_port,
                  "Takes effect the next time the phone remote starts."),
-            _row("Music level while talkback is open", self.duck,
-                 "Music drops to this level while the talkback mic is open."),
         ])
 
         # Devices
-        devices = _page("Devices", _button_column(actions, DEVICE_ACTIONS))
+        audio = _page("Audio", _button_column(actions, DEVICE_ACTIONS) + [
+            _row("Music level while talkback is open", self.duck,
+                 "Music drops to this level while the talkback mic is open."),
+        ])
 
         # Venue radio
         radio = _page("Venue Radio", _button_column(actions, RADIO_ACTIONS))
@@ -213,7 +214,7 @@ class SettingsDialog(QDialog):
 
         pages = [
             ("General", general),
-            ("Devices", devices),
+            ("Audio", audio),
             ("Venue Radio", radio),
             ("Console", console),
             ("Spotify", spotify),
