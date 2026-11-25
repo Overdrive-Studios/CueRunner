@@ -223,3 +223,15 @@ def test_load_then_start_resumes_the_same_voice(window, tmp_path):
     assert len(window._cue_voices) == 1  # no second voice
     assert not preloaded[0].paused and not preloaded[0].preloaded
     assert window._playing_cue is window.show_model.cues[0]
+
+
+def test_mic_cue_starts_talkback_and_a_stop_cue_ends_it(window):
+    from unittest import mock
+
+    mic = _add(window, "mic", "1")
+    stop = _add(window, "control", "2", target="1", action="stop")
+    with mock.patch.object(window, "start_talkback") as start, mock.patch.object(window, "stop_talkback") as stop_mic:
+        window.go_row(mic)
+        start.assert_called_once()
+        window.go_row(stop)
+        stop_mic.assert_called_once()

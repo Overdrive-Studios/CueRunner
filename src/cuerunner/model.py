@@ -28,7 +28,7 @@ DEFAULT_REMOTE_PORT = 8080
 class Cue:
     number: str
     name: str
-    kind: str = "audio"  # audio, video, camera, text, fade, control, wait, group, memo, osc, midi, light, network, console, spotify
+    kind: str = "audio"  # audio, video, camera, text, fade, control, wait, group, memo, osc, midi, light, network, mic, console, spotify
     file: str = ""
     fade_in: float = 0.0  # seconds
     fade_out: float = 0.0

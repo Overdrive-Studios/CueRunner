@@ -132,6 +132,7 @@ COLOURS = [
     ("Purple", "#7d3c98"),
 ]
 SPECIAL_KINDS = {
+    "mic": "Mic",
     "network": "Network",
     "midi": "MIDI",
     "light": "Light",
@@ -732,6 +733,8 @@ class MainWindow(QMainWindow):
             return f"{cue.text} to {cue.target or 'no port'}"
         if cue.kind == "network":
             return f"{cue.protocol.upper()} {cue.text} to {cue.target}"
+        if cue.kind == "mic":
+            return "Mic input on"
         if cue.kind == "light":
             return f"Universe {cue.universe}: {cue.text} to {cue.target}"
         if cue.kind == "group":
@@ -1307,6 +1310,9 @@ class MainWindow(QMainWindow):
             self.go_row(target_row, replace=True)
 
     def _stop_cue(self, target: Cue) -> None:
+        if target.kind == "mic":
+            self.stop_talkback()
+            return
         if target.kind in ("video", "camera", "text"):
             self._video.stop_all()
         if self.mixer is None:
@@ -1481,6 +1487,10 @@ class MainWindow(QMainWindow):
             self.table.selectRow(min(row + 1, len(cues) - 1))
             return
         if cue.kind == "memo":
+            self._finish(row)
+            return
+        if cue.kind == "mic":
+            self.start_talkback()
             self._finish(row)
             return
         if cue.kind == "network":
