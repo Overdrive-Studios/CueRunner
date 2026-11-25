@@ -287,6 +287,10 @@ class CueDialog(QDialog):
             self.display_box.addItem(label, value)
         current = max(0, self.display_box.findData(cue.video_output))
         self.display_box.setCurrentIndex(current)
+        self.opacity_spin = QSpinBox()
+        self.opacity_spin.setRange(0, 100)
+        self.opacity_spin.setSuffix(" %")
+        self.opacity_spin.setValue(round(cue.opacity * 100))
         self.route_label = QLabel(self._route_summary())
         self.route_button = QPushButton("Routing...")
         self.route_button.clicked.connect(self._edit_routing)
@@ -310,6 +314,8 @@ class CueDialog(QDialog):
         form.addRow("Outputs", outputs_row)
         if self._cue_kind in ("video", "camera", "text"):
             form.addRow("Display", self.display_box)
+        if self._cue_kind == "video":
+            form.addRow("Opacity", self.opacity_spin)
         self._build_kind_fields(cue, form, groups or [])
         form.addRow(buttons)
 
@@ -529,6 +535,8 @@ class CueDialog(QDialog):
         cue.route = [list(group) for group in self._route]
         if cue.kind in ("video", "camera", "text") and self.display_box.count():
             cue.video_output = self.display_box.currentData()
+        if cue.kind == "video":
+            cue.opacity = self.opacity_spin.value() / 100
         cue.parent = self.parent_box.currentData() or ""
         cue.pre_wait_ms = int(self.pre_wait_spin.value() * 1000)
         cue.post_wait_ms = int(self.post_wait_spin.value() * 1000)
@@ -1779,6 +1787,7 @@ class MainWindow(QMainWindow):
             else:
                 try:
                     self._video.play(cue.video_output, cue.file, self.show_model.video_routes, cue.number)
+                    self._video.set_opacity(cue.video_output, cue.opacity, self.show_model.video_routes)
                 except Exception as exc:
                     QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
             self.table.selectRow(min(row + 1, len(cues) - 1))
