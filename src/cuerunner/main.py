@@ -13,7 +13,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QThread, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QFont, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFrame,
@@ -102,6 +102,9 @@ QTableWidget {
     background: #424246; alternate-background-color: #3a3a3e; color: #ececf0;
     border: 1px solid #2e2e32; gridline-color: #2e2e32; selection-background-color: #3b82d6;
     selection-color: #ffffff; font-size: 13px;
+}
+QTableWidget::item:selected, QTableWidget::item:selected:!active {
+    background: #3b82d6; color: #ffffff;
 }
 QHeaderView::section {
     background: #6a6a70; color: #f5f5f7; border: 0; border-right: 1px solid #4f4f55;
@@ -682,8 +685,10 @@ class MainWindow(QMainWindow):
 
         self._build_toolbar()
         self._build_menus()
+        self._last_row = -1  # the last row that was highlighted; GO continues from it
         self._build_central()
         self.setAcceptDrops(True)  # drop audio, video or MIDI files onto the window to add cues
+        QApplication.instance().installEventFilter(self)  # clicks elsewhere clear the highlight
 
         go_key = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         go_key.activated.connect(self.go)
@@ -705,6 +710,7 @@ class MainWindow(QMainWindow):
         self._fit_to_screen()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        QApplication.instance().removeEventFilter(self)
         self._stop_timecode()
         self._stop_midifile()
         self._video.close()
@@ -1093,6 +1099,7 @@ class MainWindow(QMainWindow):
                            (PROGRESS_COL, 140), (REMAINING_COL, 100), (11, 80)]:
             self.table.setColumnWidth(col, width)
         self.table.itemDoubleClicked.connect(lambda item: self.edit_row(item.row()))
+        self.table.itemSelectionChanged.connect(self._remember_selected_row)
         self.table.itemSelectionChanged.connect(self._refresh_now_label)
         self.table.itemSelectionChanged.connect(self._refresh_inspector)
         layout.addWidget(self.table, 1)
@@ -1282,11 +1289,37 @@ class MainWindow(QMainWindow):
         return rows[0].row() if rows else -1
 
     def _playhead_row(self) -> int:
-        """The row GO will play next: the selected row, or the first cue."""
+        """The row GO will play next: the selected row, else the last row selected, else the first cue.
+
+        Clicking away clears the highlight but keeps this position, so GO carries on from where you were.
+        """
         if not self.show_model.cues:
             return -1
         row = self._selected_row()
-        return row if row >= 0 else 0
+        if row >= 0:
+            return row
+        if 0 <= self._last_row < len(self.show_model.cues):
+            return self._last_row
+        return 0
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt naming
+        if event.type() == QEvent.Type.MouseButtonPress and isinstance(obj, QWidget) and obj.window() is self:
+            self._on_outside_click(obj)
+        return False
+
+    def _remember_selected_row(self) -> None:
+        row = self._selected_row()
+        if row >= 0:
+            self._last_row = row
+
+    def _on_outside_click(self, widget: QWidget) -> None:
+        """A click anywhere except the cue table and the inspector clears the track highlight."""
+        if widget is self.table or self.table.isAncestorOf(widget):
+            return
+        if widget is self.inspector_bar or self.inspector_bar.isAncestorOf(widget):
+            return
+        if self.table.selectedIndexes():
+            self.table.clearSelection()
 
     def _row_of(self, cue: Cue | None) -> int:
         if cue is None:
