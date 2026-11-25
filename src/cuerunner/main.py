@@ -383,6 +383,12 @@ class CueDialog(QDialog):
             form.addRow("Text" if kind == "text" else "Notes", self.text_edit)
         if kind == "text":
             form.addRow("Font size", self.font_spin)
+        if kind == "group":
+            self.group_mode_box = QComboBox()
+            self.group_mode_box.addItem("Fire all children at once", "all")
+            self.group_mode_box.addItem("Playlist: one child after another", "playlist")
+            self.group_mode_box.setCurrentIndex(max(0, self.group_mode_box.findData(cue.group_mode)))
+            form.addRow("Mode", self.group_mode_box)
 
     def _route_summary(self) -> str:
         if not self._route:
@@ -442,6 +448,8 @@ class CueDialog(QDialog):
             cue.text = self.text_edit.toPlainText()
         if cue.kind == "text":
             cue.font_size = self.font_spin.value()
+        if cue.kind == "group":
+            cue.group_mode = self.group_mode_box.currentData()
 
 
 class MidiMappingDialog(QDialog):
@@ -1221,6 +1229,19 @@ class MainWindow(QMainWindow):
             if not voice.done and not voice.stop_when_done and voice.tag is target:
                 self.mixer.fade_out(voice, voice.tag.fade_out)
 
+    def _playlist_next_row(self, row: int) -> int | None:
+        """In a playlist group, the row of the child after this one, or None."""
+        cues = self.show_model.cues
+        if not 0 <= row < len(cues) or not cues[row].parent:
+            return None
+        group = next((c for c in cues if c.kind == "group" and c.number == cues[row].parent), None)
+        if group is None or group.group_mode != "playlist":
+            return None
+        children = [i for i, c in enumerate(cues) if c.parent == group.number]
+        if row not in children or children.index(row) + 1 >= len(children):
+            return None
+        return children[children.index(row) + 1]
+
     def _pause_cue(self, target: Cue, paused: bool) -> None:
         for voice in self._cue_voices:
             if not voice.done and voice.tag is target:
@@ -1366,8 +1387,12 @@ class MainWindow(QMainWindow):
             self._advance(row)
             return
         if cue.kind == "group":
-            for i, child in enumerate(cues):
-                if child.parent == cue.number:
+            children = [i for i, child in enumerate(cues) if child.parent == cue.number]
+            if cue.group_mode == "playlist":
+                if children:
+                    self.go_row(children[0], replace=False)
+            else:
+                for i in children:
                     self.go_row(i, replace=False)
             self._advance(row)
             return
@@ -1489,7 +1514,10 @@ class MainWindow(QMainWindow):
             if voice.natural_end and not voice.followed:
                 voice.followed = True
                 row = self._row_of(voice.tag)
-                if row >= 0 and voice.tag.then == "follow" and row + 1 < len(cues):
+                next_child = self._playlist_next_row(row) if row >= 0 else None
+                if next_child is not None:
+                    self.go_row(next_child, replace=False)
+                elif row >= 0 and voice.tag.then == "follow" and row + 1 < len(cues):
                     if voice.tag.post_wait_ms > 0:
                         self._after(voice.tag.post_wait_ms, lambda r=row + 1: self.go_row(r, replace=False))
                     else:

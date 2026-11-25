@@ -40,6 +40,29 @@ def test_memo_and_group_fire_children_and_advance(window):
     assert window.show_model.cues[child].parent == "1"
 
 
+def test_playlist_group_moves_to_the_next_child(window):
+    from cuerunner.model import Cue
+
+    window.show_model.cues.extend([
+        Cue(number="1", name="g", kind="group", group_mode="playlist"),
+        Cue(number="2", name="a", kind="memo", parent="1"),
+        Cue(number="3", name="b", kind="memo", parent="1"),
+    ])
+    assert window._playlist_next_row(1) == 2
+    assert window._playlist_next_row(2) is None
+
+
+def test_fire_all_group_has_no_playlist_next(window):
+    from cuerunner.model import Cue
+
+    window.show_model.cues.extend([
+        Cue(number="1", name="g", kind="group", group_mode="all"),
+        Cue(number="2", name="a", kind="memo", parent="1"),
+        Cue(number="3", name="b", kind="memo", parent="1"),
+    ])
+    assert window._playlist_next_row(1) is None
+
+
 def test_wait_schedules_the_next_cue(window):
     wait = _add(window, "wait", "1", duration_ms=50)
     _add(window, "memo", "2")

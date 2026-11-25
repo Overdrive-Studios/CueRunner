@@ -46,6 +46,7 @@ class Cue:
     text: str = ""  # text cues: what to show; memo cues: notes
     font_size: int = 96  # text cues: point size on the display
     parent: str = ""  # the number of the group cue this cue belongs to
+    group_mode: str = "all"  # group cues: "all" fires every child; "playlist" runs them one after another
     universe: int = 0  # light cues: the Art-Net universe
     colour: str = ""  # a hex colour shown on the cue's row, e.g. "#2980b9"; empty for none
     pre_wait_ms: int = 0  # wait this long after GO before the cue starts
