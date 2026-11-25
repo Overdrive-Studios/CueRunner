@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 from cuerunner import allenheath as ah
 from cuerunner.spotify_ui import run_async
 
-FAMILIES = [("SQ (standard)", "sq"), ("dLive", "dlive")]
+FAMILIES = [("SQ (standard)", "sq"), ("dLive", "dlive"), ("Avantis", "avantis"), ("Qu-5/6/7", "qu")]
 
 
 class ConsoleDialog(QDialog):
@@ -91,12 +91,13 @@ class ConsoleDialog(QDialog):
         return self.family.currentData()
 
     def _family_changed(self) -> None:
-        dlive = self.current_family() == "dlive"
-        self.scene.setRange(1, 500 if dlive else 300)
-        self.channel.setRange(1, 12 if dlive else 16)
-        self.channel.setValue(min(self.channel.value(), 12) if dlive else self.channel.value())
-        self.input_no.setRange(1, 128 if dlive else 48)
-        if dlive:
+        family = self.current_family()
+        max_input, max_scene, max_channel = ah.FAMILY_LIMITS[family]
+        self.scene.setRange(1, max_scene)
+        self.channel.setRange(1, max_channel)
+        self.channel.setValue(min(self.channel.value(), max_channel))
+        self.input_no.setRange(1, max_input)
+        if family in ("dlive", "avantis"):
             self.level_label.setText("Fader (raw 0-127)")
             self.level.setRange(0, 127)
             self.level.setDecimals(0)
@@ -109,12 +110,14 @@ class ConsoleDialog(QDialog):
 
     def _build(self, kind: str, *args) -> bytes:
         channel = self.channel.value()
-        if self.current_family() == "dlive":
+        family = self.current_family()
+        if family in ("dlive", "avantis"):
+            max_input, max_scene, _ = ah.FAMILY_LIMITS[family]
             if kind == "scene":
-                return ah.dlive_scene_recall(args[0], channel)
+                return ah.dlive_scene_recall(args[0], channel, max_scene)
             if kind == "mute":
-                return ah.dlive_mute(args[0], args[1], channel)
-            return ah.dlive_fader_raw(args[0], int(args[1]), channel)
+                return ah.dlive_mute(args[0], args[1], channel, max_input)
+            return ah.dlive_fader_raw(args[0], int(args[1]), channel, max_input)
         if kind == "scene":
             return ah.sq_scene_recall(args[0], channel)
         if kind == "mute":

@@ -145,51 +145,66 @@ def _dlive_channel(channel: int) -> int:
     return channel - 1
 
 
-def dlive_scene_recall(scene: int, channel: int = 1) -> bytes:
-    """Recall scene 1 to 500: bank select (CC 0, bank 00 to 03) then program change."""
-    _check(scene, 1, 500, "Scene")
+def dlive_scene_recall(scene: int, channel: int = 1, max_scene: int = 500) -> bytes:
+    """Recall scene 1 to max_scene: bank select (CC 0, bank 00 to 03) then program change."""
+    _check(scene, 1, max_scene, "Scene")
     n = _dlive_channel(channel)
     bank, program = divmod(scene - 1, 128)
     return bytes([0xB0 | n, 0x00, bank, 0xC0 | n, program])
 
 
-def dlive_mute(input_no: int, mute: bool, channel: int = 1) -> bytes:
-    """Mute or unmute input 1 to 128. The spec uses a Note On on the input's channel, then a Note Off."""
-    _check(input_no, 1, 128, "Input")
+def dlive_mute(input_no: int, mute: bool, channel: int = 1, max_input: int = 128) -> bytes:
+    """Mute or unmute input 1 to max_input. The spec uses a Note On on the input's channel, then a Note Off."""
+    _check(input_no, 1, max_input, "Input")
     n = _dlive_channel(channel)
     ch = input_no - 1
     velocity = 0x7F if mute else 0x3F
     return bytes([0x90 | n, ch, velocity, 0x90 | n, ch, 0x00])
 
 
-def dlive_fader_raw(input_no: int, value: int, channel: int = 1) -> bytes:
+def dlive_fader_raw(input_no: int, value: int, channel: int = 1, max_input: int = 128) -> bytes:
     """Set an input fader with the spec's raw value 0 to 127 (-inf to +10 dB). The spec gives no dB table."""
-    _check(input_no, 1, 128, "Input")
+    _check(input_no, 1, max_input, "Input")
     _check(value, 0, 127, "Fader value")
     n = _dlive_channel(channel)
     ch = input_no - 1
     return bytes([0xB0 | n, 0x63, ch, 0xB0 | n, 0x62, 0x17, 0xB0 | n, 0x06, value])
 
 
-def parse_dlive_command(text: str, channel: int = 1) -> bytes:
-    """Parse a dLive console cue: "scene 7", "mute 1", "unmute 1", "fader 1 64" (raw 0 to 127)."""
+# Per family: (inputs, scenes, MIDI channels) the console supports.
+FAMILY_LIMITS = {
+    "sq": (48, 300, 16),
+    "qu": (48, 128, 16),
+    "dlive": (128, 500, 12),
+    "avantis": (96, 500, 12),
+}
+
+
+def parse_dlive_command(text: str, channel: int = 1, family: str = "dlive") -> bytes:
+    """Parse a dLive or Avantis console cue: "scene 7", "mute 1", "unmute 1", "fader 1 64" (raw 0 to 127)."""
+    max_input, max_scene, _ = FAMILY_LIMITS[family]
     parts = text.strip().lower().split()
     try:
         if len(parts) == 2 and parts[0] == "scene":
-            return dlive_scene_recall(int(parts[1]), channel)
+            return dlive_scene_recall(int(parts[1]), channel, max_scene)
         if len(parts) == 2 and parts[0] in ("mute", "unmute"):
-            return dlive_mute(int(parts[1]), parts[0] == "mute", channel)
+            return dlive_mute(int(parts[1]), parts[0] == "mute", channel, max_input)
         if len(parts) == 3 and parts[0] == "fader":
-            return dlive_fader_raw(int(parts[1]), int(parts[2]), channel)
+            return dlive_fader_raw(int(parts[1]), int(parts[2]), channel, max_input)
     except ValueError as exc:
         raise ValueError(str(exc)) from exc
     raise ValueError("Use: scene 7, mute 1, unmute 1 or fader 1 64 (dLive fader is raw 0 to 127)")
 
 
 def parse_command(family: str, text: str, channel: int = 1) -> bytes:
-    """Route a console cue command to the right family's parser. family is 'sq' or 'dlive'."""
-    if family == "dlive":
-        return parse_dlive_command(text, channel)
+    """Route a console cue command to the right family's parser: sq, qu, dlive or avantis."""
+    if family in ("dlive", "avantis"):
+        return parse_dlive_command(text, channel, family)
+    parts = text.strip().lower().split()
+    if family == "qu" and len(parts) == 2 and parts[0] == "scene" and parts[1].isdigit():
+        _, max_scene, _ = FAMILY_LIMITS["qu"]
+        if int(parts[1]) > max_scene:
+            raise ValueError(f"Scene must be 1 to {max_scene} on Qu")
     return parse_sq_command(text, channel)
 
 

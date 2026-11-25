@@ -21,7 +21,9 @@ Cue-based show control for Windows and macOS. Working name.
 
 - **Allen & Heath SQ (standard):** built from the SQ MIDI Protocol Issue 5 document. Set the console's IP and family under Audio → Allen & Heath Console. Scene recall, mute, and level are supported, and console cues use commands such as `scene 7`, `mute 1`, or `level 1 -6`. Test on the desk before relying on it.
 - **Allen & Heath dLive:** built from the dLive MIDI over TCP spec (firmware V1.9 and later, which the spec says also covers later firmware). Scene recall, mute, and a raw fader value (0 to 127). The spec has no dB table, so dLive levels are not in dB. Test on the desk before relying on it.
-- **Allen & Heath Avantis, Qu, SQ+:** not built yet. Each needs its current protocol document.
+- **Allen & Heath Avantis (V2.0 and later):** built from its MIDI over TCP page. Scene recall, mute for inputs 1 to 96, and raw fader value. Its level table isn't in the app yet, so levels are raw.
+- **Allen & Heath Qu-5/6/7 (V1.1 and later):** built from the Qu-5/6/7 MIDI protocol. Uses the SQ command formats, with scenes 1 to 128. Older Qu-16/24/32 consoles are not covered by these commands.
+- **Allen & Heath SQ+:** not built. The manufacturer says its protocol is almost identical to the SQ's but hasn't published the document yet.
 - **Yamaha and Q-SYS:** not built yet. They need each manufacturer's protocol documentation and hardware to test against.
 - **Spotify:** needs a Spotify developer app (Client ID) and a Premium account. Set up under Audio → Spotify. Add cues with Add Spotify Cue. Playback runs on a Spotify device that is already open on the computer or speaker you choose.
 - **Stream Deck:** not built as a plugin. The phone remote's HTTP endpoint can be called from a Stream Deck web-request action, using the `X-PIN` header.
