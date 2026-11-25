@@ -38,7 +38,6 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QMessageBox,
     QProgressBar,
-    QProgressDialog,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -2485,21 +2484,7 @@ class MainWindow(QMainWindow):
 
     def _download_update(self, release: updater.Release, owner: QWidget) -> None:
         dest = Path(tempfile.mkdtemp(prefix="cuerunner-dl-")) / release.asset_name
-        dialog = QProgressDialog(f"Downloading CueRunner {release.tag}...", "Cancel", 0, 100, owner)
-        dialog.setWindowTitle("Update CueRunner")
-        dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        dialog.setMinimumDuration(0)
-        dialog.setAutoClose(False)
-        dialog.setAutoReset(False)
-        dialog.setMinimumWidth(420)
-        bar = dialog.findChild(QProgressBar)
-        if bar is not None:  # the app theme makes bars 8px tall, which hides the percentage
-            bar.setStyleSheet(
-                "QProgressBar { background: #1a1a1c; border: 0; border-radius: 4px; min-height: 22px;"
-                " color: #f0f0f0; text-align: center; }"
-                " QProgressBar::chunk { background: #3b82d6; border-radius: 4px; }"
-            )
-            bar.setTextVisible(True)
+        dialog = _DownloadDialog(f"Downloading CueRunner {release.tag}...", owner)
         dialog.setValue(0)
 
         def show_progress(value: int) -> None:
@@ -2512,10 +2497,10 @@ class MainWindow(QMainWindow):
 
         worker = _DownloadWorker(release.asset_url, dest, owner)
         worker.progress.connect(show_progress)
-        worker.failed.connect(lambda msg: (dialog.close(), QMessageBox.critical(owner, "Update failed", msg)))
+        worker.failed.connect(lambda msg: (dialog.finish(), QMessageBox.critical(owner, "Update failed", msg)))
 
         def finished(path: str) -> None:
-            dialog.close()
+            dialog.finish()
             try:
                 updater.apply_update(Path(path))
             except Exception as exc:
@@ -2534,6 +2519,59 @@ class MainWindow(QMainWindow):
         dialog.canceled.connect(worker.requestInterruption)
         worker.start()
         self._update_worker = worker  # keep a reference while it runs
+
+
+class _DownloadDialog(QDialog):
+    """Update download progress. Cancel sits under the bar, on the right, and emits canceled once."""
+
+    canceled = Signal()
+
+    def __init__(self, text: str, parent: QWidget | None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Update CueRunner")
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setMinimumWidth(420)
+        self._finished = False
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(text))
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 100)
+        self._bar.setValue(0)
+        # the app theme makes bars 8px tall, which hides the percentage
+        self._bar.setStyleSheet(
+            "QProgressBar { background: #1a1a1c; border: 0; border-radius: 4px; min-height: 22px;"
+            " color: #f0f0f0; text-align: center; }"
+            " QProgressBar::chunk { background: #3b82d6; border-radius: 4px; }"
+        )
+        self._bar.setTextVisible(True)
+        layout.addWidget(self._bar)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+
+    def setValue(self, value: int) -> None:  # noqa: N802 - same name as QProgressDialog, so callers stay the same
+        self._bar.setValue(value)
+
+    def setRange(self, low: int, high: int) -> None:  # noqa: N802
+        self._bar.setRange(low, high)
+
+    def maximum(self) -> int:
+        return self._bar.maximum()
+
+    def finish(self) -> None:
+        """Close because the download ended, not because the user cancelled."""
+        self._finished = True
+        self.close()
+
+    def reject(self) -> None:
+        if not self._finished:
+            self.canceled.emit()
+        super().reject()
 
 
 def run() -> int:
