@@ -8,10 +8,13 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import ssl
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+import certifi
 
 from cuerunner.version import REPO, __version__
 
@@ -55,10 +58,19 @@ def pick_asset(assets: list[dict], name: str | None) -> dict | None:
     return next((a for a in assets if a.get("name") == name), None)
 
 
+def _ssl_context() -> ssl.SSLContext:
+    """Verify HTTPS against the certifi CA bundle.
+
+    The macOS build of Python does not use the system certificate store by default,
+    which made update checks fail with CERTIFICATE_VERIFY_FAILED.
+    """
+    return ssl.create_default_context(cafile=certifi.where())
+
+
 def fetch_latest_release(timeout: float = 15) -> Release | None:
     """Return the latest release's build for this platform, or None if nothing usable is published."""
     request = urllib.request.Request(API_LATEST, headers={"Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with urllib.request.urlopen(request, timeout=timeout, context=_ssl_context()) as response:
         data = json.load(response)
     asset = pick_asset(data.get("assets", []), platform_asset_name())
     if asset is None:
@@ -67,7 +79,7 @@ def fetch_latest_release(timeout: float = 15) -> Release | None:
 
 
 def download(url: str, dest: Path, progress: Callable[[int], None] | None = None) -> Path:
-    with urllib.request.urlopen(url, timeout=60) as response, open(dest, "wb") as out:
+    with urllib.request.urlopen(url, timeout=60, context=_ssl_context()) as response, open(dest, "wb") as out:
         total = int(response.headers.get("Content-Length", 0))
         done = 0
         while chunk := response.read(256 * 1024):

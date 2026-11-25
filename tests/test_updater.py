@@ -41,3 +41,17 @@ def test_macos_script_stages_then_swaps_bundle() -> None:
     assert "kill -0 42" in script
     assert f"{bundle}.new" in script
     assert f"xattr -dr com.apple.quarantine {shlex.quote(str(bundle))}" in script
+
+
+def test_update_requests_verify_certificates_with_certifi() -> None:
+    import ssl
+
+    import certifi
+
+    from cuerunner.updater import _ssl_context
+
+    context = _ssl_context()
+    assert isinstance(context, ssl.SSLContext)
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    assert certifi.where()
