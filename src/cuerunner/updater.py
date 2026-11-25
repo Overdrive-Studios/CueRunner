@@ -114,18 +114,26 @@ def windows_swap_script(pid: int, new_exe: Path, current_exe: Path) -> str:
 
 
 def macos_swap_script(pid: int, dmg: Path, bundle: Path) -> str:
+    """Wait for the app to quit, swap in the new build, and reopen it.
+
+    Any failure reopens the existing app, so a failed update never leaves the user with nothing.
+    Output goes to a log in the temp folder.
+    """
     staging = f"{bundle}.new"
+    q_bundle = shlex.quote(str(bundle))
     return "\n".join([
         "#!/bin/sh",
+        "exec >>\"${TMPDIR:-/tmp}/cuerunner-update.log\" 2>&1",
         f"while kill -0 {pid} 2>/dev/null; do sleep 1; done",
         "MNT=$(mktemp -d)",
-        f"hdiutil attach -nobrowse -quiet -mountpoint \"$MNT\" {shlex.quote(str(dmg))} || exit 1",
+        "fail() { echo \"update failed: $1\"; hdiutil detach -quiet \"$MNT\" 2>/dev/null; open " + q_bundle + "; exit 1; }",
+        f"hdiutil attach -nobrowse -quiet -mountpoint \"$MNT\" {shlex.quote(str(dmg))} || fail attach",
         f"rm -rf {shlex.quote(staging)}",
-        f"cp -R \"$MNT/CueRunner.app\" {shlex.quote(staging)} || exit 1",
-        "hdiutil detach -quiet \"$MNT\"",
-        f"rm -rf {shlex.quote(str(bundle))} && mv {shlex.quote(staging)} {shlex.quote(str(bundle))}",
-        f"xattr -dr com.apple.quarantine {shlex.quote(str(bundle))}",
-        f"open {shlex.quote(str(bundle))}",
+        f"cp -R \"$MNT/CueRunner.app\" {shlex.quote(staging)} || fail copy",
+        "hdiutil detach -quiet \"$MNT\" || true",
+        f"rm -rf {q_bundle} && mv {shlex.quote(staging)} {q_bundle} || fail swap",
+        f"xattr -dr com.apple.quarantine {q_bundle}",
+        f"open {q_bundle}",
         "rm -f \"$0\"",
         "",
     ])
