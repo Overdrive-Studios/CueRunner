@@ -30,7 +30,7 @@ Cue-based show control for Windows and macOS. Working name.
 - **MIDI mapping:** the defaults are notes 36 to 39 (GO, STOP, PAUSE, PANIC). Change them under Audio → MIDI Mapping. The mapping is saved with the show file.
 - **Audio files:** each file is decoded fully into memory when it is first loaded. Very long files use a lot of memory.
 - **File types:** WAV, AIFF, FLAC, OGG, and MP3 are read by the audio library. M4A and AAC are not supported.
-- **Routing:** mono clips go to outputs 1 and 2, and stereo clips go to 1 and 2 as left and right. Routing for more outputs is not built into the app yet.
+- **Routing:** each audio cue has its own Routing grid in the cue editor (Edit Cue → Outputs → Routing...). Tick which outputs each input goes to. Clear it to use the default, where mono goes to outputs 1 and 2 and stereo goes to 1 and 2. Routing covers 8 inputs and every output the device has. Pads and venue radio still use the default routing.
 - **ASIO and Dante:** these depend on the audio library being built with ASIO support, and on your interface's driver. Check on your own machine.
 - **Untested on hardware:** the logic is covered by tests, but the window, audio output, mic, recorder, and remote have not been run on real Windows or macOS hardware.
 

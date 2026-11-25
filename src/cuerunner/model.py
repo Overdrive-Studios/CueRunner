@@ -34,6 +34,7 @@ class Cue:
     duration_ms: int = 0  # filled in from the audio file when it is first probed
     loop: bool = False
     then: str = "none"  # "none", "follow" (start next when this ends), or "continue" (start next now)
+    route: list = field(default_factory=list)  # per clip channel, the 1-based outputs it goes to; empty = default
 
 
 @dataclass

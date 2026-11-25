@@ -45,7 +45,18 @@ from cuerunner import allenheath, console_ui, spotify, spotify_ui, updater
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
 from cuerunner.feedback import FeedbackSuppressor
-from cuerunner.engine import Clip, LiveVoice, Mixer, Voice, default_matrix, load_clip, probe_duration_ms
+from cuerunner.engine import (
+    Clip,
+    LiveVoice,
+    Mixer,
+    Voice,
+    default_matrix,
+    format_route,
+    load_clip,
+    parse_route,
+    probe_duration_ms,
+    route_matrix,
+)
 from cuerunner.model import Cue, Pad, RadioSettings, Show
 from cuerunner.playlist import Playlist, scan_audio
 import queue
@@ -94,12 +105,80 @@ class _DownloadWorker(QThread):
         self.done.emit(str(path))
 
 
-class CueDialog(QDialog):
-    """Edit a cue's name, fades, loop, follow/continue and hotkey."""
+class RoutingDialog(QDialog):
+    """Grid of input channels against outputs. Tick an output to send that input there.
 
-    def __init__(self, cue: Cue, parent=None) -> None:
+    Clearing every box (or leaving them all empty) uses the default routing.
+    """
+
+    INPUTS = 8
+
+    def __init__(self, route: list[list[int]], out_channels: int, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Routing")
+        self.resize(min(900, 80 + 34 * out_channels), 360)
+        self._out = out_channels
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "Tick the outputs each input goes to. Clear all boxes for the default routing. "
+            "Stereo files use inputs 1 and 2."
+        ))
+        self.table = QTableWidget(self.INPUTS, out_channels)
+        self.table.setVerticalHeaderLabels([f"In {i + 1}" for i in range(self.INPUTS)])
+        self.table.setHorizontalHeaderLabels([str(o + 1) for o in range(out_channels)])
+        self.table.horizontalHeader().setDefaultSectionSize(30)
+        self.table.verticalHeader().setDefaultSectionSize(26)
+        for r in range(self.INPUTS):
+            for c in range(out_channels):
+                item = QTableWidgetItem()
+                item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+                on = r < len(route) and (c + 1) in route[r]
+                item.setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+                self.table.setItem(r, c, item)
+        layout.addWidget(self.table)
+
+        presets = QHBoxLayout()
+        stereo = QPushButton("Stereo 1+2")
+        stereo.clicked.connect(lambda: self._preset([[1], [2]]))
+        mono = QPushButton("Mono to 1+2")
+        mono.clicked.connect(lambda: self._preset([[1, 2]]))
+        clear = QPushButton("Clear")
+        clear.clicked.connect(lambda: self._preset([]))
+        for button in (stereo, mono, clear):
+            presets.addWidget(button)
+        presets.addStretch(1)
+        layout.addLayout(presets)
+
+        box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        layout.addWidget(box)
+
+    def _preset(self, route: list[list[int]]) -> None:
+        for r in range(self.INPUTS):
+            for c in range(self._out):
+                on = r < len(route) and (c + 1) in route[r]
+                self.table.item(r, c).setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+
+    def result_route(self) -> list[list[int]]:
+        route: list[list[int]] = []
+        for r in range(self.INPUTS):
+            outs = [c + 1 for c in range(self._out) if self.table.item(r, c).checkState() == Qt.CheckState.Checked]
+            route.append(outs)
+        while route and not route[-1]:
+            route.pop()
+        if all(not group for group in route):
+            return []
+        return route
+
+
+class CueDialog(QDialog):
+    """Edit a cue's name, fades, loop, follow/continue, hotkey and outputs."""
+
+    def __init__(self, cue: Cue, parent=None, out_channels: int = MAX_CHANNELS) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Cue {cue.number}")
+        self._out_channels = out_channels
 
         self.name_edit = QLineEdit(cue.name)
         self.fade_in = self._fade_spin(cue.fade_in)
@@ -112,6 +191,10 @@ class CueDialog(QDialog):
         self.then_box.addItem("Continue: start the next cue at the same time", "continue")
         self.then_box.setCurrentIndex(max(0, self.then_box.findData(cue.then)))
         self.hotkey_edit = QKeySequenceEdit(QKeySequence(cue.hotkey))
+        self._route: list[list[int]] = [list(group) for group in cue.route]
+        self.route_label = QLabel(self._route_summary())
+        self.route_button = QPushButton("Routing...")
+        self.route_button.clicked.connect(self._edit_routing)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
@@ -124,7 +207,25 @@ class CueDialog(QDialog):
         form.addRow("", self.loop_box)
         form.addRow("Then", self.then_box)
         form.addRow("Hotkey", self.hotkey_edit)
+        outputs_row = QHBoxLayout()
+        outputs_row.addWidget(self.route_label, 1)
+        outputs_row.addWidget(self.route_button)
+        form.addRow("Outputs", outputs_row)
         form.addRow(buttons)
+
+    def _route_summary(self) -> str:
+        if not self._route:
+            return "Default"
+        return "; ".join(
+            f"In {i + 1} → " + (", ".join(str(o) for o in group) if group else "none")
+            for i, group in enumerate(self._route)
+        )
+
+    def _edit_routing(self) -> None:
+        dialog = RoutingDialog(self._route, self._out_channels, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._route = dialog.result_route()
+            self.route_label.setText(self._route_summary())
 
     @staticmethod
     def _fade_spin(value: float) -> QDoubleSpinBox:
@@ -142,6 +243,7 @@ class CueDialog(QDialog):
         cue.loop = self.loop_box.isChecked()
         cue.then = self.then_box.currentData()
         cue.hotkey = self.hotkey_edit.keySequence().toString()
+        cue.route = [list(group) for group in self._route]
 
 
 class MidiMappingDialog(QDialog):
@@ -683,7 +785,7 @@ class MainWindow(QMainWindow):
         if not 0 <= row < len(self.show_model.cues):
             return
         cue = self.show_model.cues[row]
-        dialog = CueDialog(cue, self)
+        dialog = CueDialog(cue, self, self.mixer.out_channels if self.mixer is not None else MAX_CHANNELS)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             dialog.apply_to(cue)
             self._refresh_table()
@@ -741,7 +843,7 @@ class MainWindow(QMainWindow):
                         self.mixer.fade_out(voice, voice.tag.fade_out)
             voice = Voice(
                 clip=clip,
-                matrix=default_matrix(clip.channels, self.mixer.out_channels),
+                matrix=route_matrix(cue.route, clip.channels, self.mixer.out_channels),
                 loop=cue.loop,
                 bed=True,
                 tag=cue,

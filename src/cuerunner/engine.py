@@ -55,6 +55,45 @@ def probe_duration_ms(path: str | Path) -> int:
     return round(info.frames * 1000 / info.samplerate)
 
 
+def route_matrix(route: list[list[int]], clip_channels: int, out_channels: int) -> np.ndarray:
+    """Matrix from a cue's route: route[i] is the list of 1-based outputs that clip channel i goes to.
+
+    An empty route uses the default. Outputs beyond the device's count are ignored. Clip channels
+    with no entry in route stay silent.
+    """
+    if not route:
+        return default_matrix(clip_channels, out_channels)
+    matrix = np.zeros((clip_channels, out_channels), dtype=np.float32)
+    for i in range(min(clip_channels, len(route))):
+        for out in route[i]:
+            if 1 <= out <= out_channels:
+                matrix[i, out - 1] = 1.0
+    return matrix
+
+
+def parse_route(text: str, out_channels: int) -> list[list[int]]:
+    """Parse "1 2" (clip 1 to output 1, clip 2 to output 2) or "1+2 3" (clip 1 to outputs 1 and 2).
+
+    Empty text means the default routing. Raises ValueError with a readable message on bad input.
+    """
+    text = text.strip()
+    if not text:
+        return []
+    route: list[list[int]] = []
+    for group in text.split():
+        outputs = []
+        for part in group.split("+"):
+            if not part.isdigit() or not 1 <= int(part) <= out_channels:
+                raise ValueError(f"Output '{part}' must be a number from 1 to {out_channels}.")
+            outputs.append(int(part))
+        route.append(outputs)
+    return route
+
+
+def format_route(route: list[list[int]]) -> str:
+    return " ".join("+".join(str(o) for o in group) for group in route)
+
+
 def default_matrix(clip_channels: int, out_channels: int) -> np.ndarray:
     """Routing from clip channels to output channels.
 
