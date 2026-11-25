@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QBrush, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cuerunner import allenheath, console_ui, spotify, spotify_ui, updater
+from cuerunner import allenheath, console_ui, settings_ui, spotify, spotify_ui, updater
 from cuerunner.devices import DeviceInfo, label as devices_label
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
@@ -467,6 +467,8 @@ class MainWindow(QMainWindow):
         ]:
             bar.addAction(label, handler)
         bar.addSeparator()
+        bar.addAction("Settings...", self.open_settings)
+        bar.addSeparator()
         self.pads_action = bar.addAction("Pads")
         self.pads_action.setCheckable(True)
         self.pads_action.setChecked(True)
@@ -493,8 +495,9 @@ class MainWindow(QMainWindow):
         audio_menu.addAction("Start MIDI Input...", self.start_midi)
         audio_menu.addAction("Stop MIDI Input", self.stop_midi)
         audio_menu.addAction("MIDI Mapping...", self.edit_midi_mapping)
-        audio_menu.addAction("Duck Level...", self.choose_duck_level)
-        audio_menu.addAction("Phone Remote Port...", self.choose_remote_port)
+        settings_action = audio_menu.addAction("Settings...", self.open_settings)
+        settings_action.setShortcut(QKeySequence(QKeySequence.StandardKey.Preferences))
+        settings_action.setMenuRole(QAction.MenuRole.PreferencesRole)
         audio_menu.addAction("Spotify...", self.open_spotify)
         audio_menu.addAction("Allen & Heath Console...", self.open_console)
         audio_menu.addSeparator()
@@ -1102,24 +1105,10 @@ class MainWindow(QMainWindow):
         if self._midi is not None:
             self._midi.set_mapping(self.show_model.midi_map)
 
-    def choose_remote_port(self) -> None:
-        port, ok = QInputDialog.getInt(
-            self, "Phone remote port", "Port for the phone remote (1024 to 65535):", self.show_model.remote_port, 1024, 65535
-        )
-        if ok:
-            self.show_model.remote_port = port
-
-    def choose_duck_level(self) -> None:
-        percent, ok = QInputDialog.getInt(
-            self,
-            "Duck level",
-            "Music level while the talkback mic is open (percent of full level):",
-            round(self.show_model.duck_level * 100),
-            0,
-            100,
-        )
-        if ok:
-            self.show_model.duck_level = percent / 100
+    def open_settings(self) -> None:
+        dialog = settings_ui.SettingsDialog(self.show_model, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            settings_ui.apply_settings(self.show_model, dialog.values())
 
     def stop_midi(self) -> None:
         if self._midi is not None:
