@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 import queue
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-ALLOWED_COMMANDS = {"go", "stop", "pause", "panic"}
+ALLOWED_COMMANDS_RE = re.compile(r"^(go|stop|pause|panic|cue:\d+|pad:\d+)$")
 MAX_FAILED_ATTEMPTS = 10  # after this many wrong PINs, the remote refuses everything until restarted
 
 PAGE = """<!doctype html>
@@ -88,7 +89,7 @@ def handle(state: RemoteState, method: str, path: str, headers, body: bytes) -> 
             command = json.loads(body or b"{}").get("cmd")
         except (ValueError, AttributeError):
             return 400, "text/plain", b"Bad request"
-        if command not in ALLOWED_COMMANDS:
+        if not isinstance(command, str) or not ALLOWED_COMMANDS_RE.match(command):
             return 400, "text/plain", b"Unknown command"
         state.commands.put(command)
         return 200, "application/json", b'{"ok": true}'

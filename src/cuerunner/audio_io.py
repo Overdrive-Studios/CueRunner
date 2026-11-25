@@ -2,41 +2,52 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
 
-import sounddevice as sd
+from cuerunner.devices import DeviceInfo, enable_asio, ordered
 
-from cuerunner.engine import Mixer
+# ASIO has to be switched on before sounddevice (and its PortAudio DLL) is imported.
+enable_asio(os.environ)
+
+import sounddevice as sd  # noqa: E402
+
+from cuerunner.engine import Mixer  # noqa: E402
 
 BLOCK_SIZE = 256  # roughly 5 ms at 48 kHz; smaller is lower latency but needs a faster machine
 
+__all__ = ["DeviceInfo", "AudioOutput", "MicInput", "output_devices", "input_devices", "default_output", "ordered"]
 
-@dataclass
-class DeviceInfo:
-    index: int | None  # None means the system default device
-    name: str
-    channels: int
-    samplerate: float
+
+def _host_api_name(device) -> str:
+    try:
+        return sd.query_hostapis(device["hostapi"])["name"]
+    except Exception:
+        return ""
+
+
+def _devices(direction: str) -> list[DeviceInfo]:
+    channel_key = "max_output_channels" if direction == "output" else "max_input_channels"
+    devices = []
+    for index, device in enumerate(sd.query_devices()):
+        if device[channel_key] > 0:
+            devices.append(
+                DeviceInfo(
+                    index,
+                    device["name"],
+                    int(device[channel_key]),
+                    float(device["default_samplerate"]),
+                    _host_api_name(device),
+                )
+            )
+    return ordered(devices)
 
 
 def output_devices() -> list[DeviceInfo]:
-    devices = []
-    for index, device in enumerate(sd.query_devices()):
-        if device["max_output_channels"] > 0:
-            devices.append(
-                DeviceInfo(index, device["name"], int(device["max_output_channels"]), float(device["default_samplerate"]))
-            )
-    return devices
+    return _devices("output")
 
 
 def input_devices() -> list[DeviceInfo]:
-    devices = []
-    for index, device in enumerate(sd.query_devices()):
-        if device["max_input_channels"] > 0:
-            devices.append(
-                DeviceInfo(index, device["name"], int(device["max_input_channels"]), float(device["default_samplerate"]))
-            )
-    return devices
+    return _devices("input")
 
 
 class MicInput:
@@ -74,7 +85,9 @@ class MicInput:
 
 def default_output() -> DeviceInfo:
     device = sd.query_devices(kind="output")
-    return DeviceInfo(None, device["name"], int(device["max_output_channels"]), float(device["default_samplerate"]))
+    return DeviceInfo(
+        None, device["name"], int(device["max_output_channels"]), float(device["default_samplerate"]), _host_api_name(device)
+    )
 
 
 class AudioOutput:

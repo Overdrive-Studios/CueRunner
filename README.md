@@ -31,7 +31,7 @@ Cue-based show control for Windows and macOS. Working name.
 - **Audio files:** each file is decoded fully into memory when it is first loaded. Very long files use a lot of memory.
 - **File types:** WAV, AIFF, FLAC, OGG, and MP3 are read by the audio library. M4A and AAC are not supported.
 - **Routing:** each audio cue has its own Routing grid in the cue editor (Edit Cue → Outputs → Routing...). Tick which outputs each input goes to. Clear it to use the default, where mono goes to outputs 1 and 2 and stereo goes to 1 and 2. Routing covers 8 inputs and every output the device has. Pads and venue radio still use the default routing.
-- **ASIO and Dante:** these depend on the audio library being built with ASIO support, and on your interface's driver. Check on your own machine.
+- **ASIO and Dante:** ASIO is switched on at startup, and ASIO devices are listed first in every device menu with their host API shown, such as `Dante Virtual Soundcard [ASIO] (64 ch)`. Dante Virtual Soundcard only shows that name in ASIO mode, so set it to ASIO in its own settings. Set `CUERUNNER_NO_ASIO=1` to turn ASIO off if a driver causes crashes. Networked Dante hardware is reached through Dante Virtual Soundcard or Dante Via on the same computer, not directly. Not yet tested on real Dante hardware.
 - **Untested on hardware:** the logic is covered by tests, but the window, audio output, mic, recorder, and remote have not been run on real Windows or macOS hardware.
 
 ## Development

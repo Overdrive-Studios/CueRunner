@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 )
 
 from cuerunner import allenheath, console_ui, spotify, spotify_ui, updater
+from cuerunner.devices import label as devices_label
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
 from cuerunner.feedback import FeedbackSuppressor
@@ -390,14 +391,20 @@ class MainWindow(QMainWindow):
         if not devices:
             QMessageBox.information(self, "Audio output", "No audio output devices were found.")
             return
-        names = [f"{d.name} ({d.channels} ch)" for d in devices]
+        names = [devices_label(d) for d in devices]
         name, ok = QInputDialog.getItem(self, "Output device", "Choose the output device:", names, 0, False)
         if not ok:
             return
         try:
             self._open_output(devices[names.index(name)])
         except Exception as exc:
-            QMessageBox.critical(self, "Audio output", f"Could not open that device:\n{exc}")
+            QMessageBox.critical(
+                self,
+                "Audio output",
+                f"Could not open that device:\n{exc}\n\n"
+                "For an ASIO device (such as Dante Virtual Soundcard), check that the driver's sample rate "
+                "and channel count match the device, and that no other program is holding it.",
+            )
 
     def _clip(self, path: str) -> Clip:
         if self.mixer is None:
@@ -1093,7 +1100,7 @@ class MainWindow(QMainWindow):
         if not devices:
             QMessageBox.information(self, "Recorder", "No input devices were found.")
             return
-        names = [f"{d.name} ({d.channels} ch)" for d in devices]
+        names = [devices_label(d) for d in devices]
         name, ok = QInputDialog.getItem(self, "Record input", "Choose the input device:", names, 0, False)
         if not ok:
             return
@@ -1154,7 +1161,7 @@ class MainWindow(QMainWindow):
         if not devices:
             QMessageBox.information(self, "Talkback mic", "No input devices were found.")
             return
-        names = ["System default"] + [f"{d.name} ({d.channels} ch)" for d in devices]
+        names = ["System default"] + [devices_label(d) for d in devices]
         name, ok = QInputDialog.getItem(self, "Mic input", "Choose the talkback input:", names, 0, False)
         if not ok:
             return

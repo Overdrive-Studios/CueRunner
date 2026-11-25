@@ -80,3 +80,15 @@ def test_real_http_round_trip() -> None:
             assert exc.code == 403
     finally:
         server.stop()
+
+
+def test_remote_accepts_cue_and_pad_commands() -> None:
+    from cuerunner.remote import RemoteState, handle
+
+    state = RemoteState("1234")
+    headers = {"X-PIN": "1234"}
+    for cmd in ("go", "cue:0", "pad:63"):
+        status, _, _ = handle(state, "POST", "/api/cmd", headers, b'{"cmd": "%s"}' % cmd.encode())
+        assert status == 200, cmd
+    status, _, _ = handle(state, "POST", "/api/cmd", headers, b'{"cmd": "explode"}')
+    assert status == 400
