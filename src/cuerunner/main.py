@@ -50,7 +50,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cuerunner import allenheath, artnet, console_ui, fx, launcher, midi, mtc, netsend, osc, sacn, settings_ui, spotify, spotify_ui, updater, video_out
+from cuerunner import allenheath, artnet, console_ui, fx, launcher, midi, mtc, netsend, osc, sacn, settings_ui, spotify, spotify_ui, updater, video_out, waveform
 from cuerunner.devices import DeviceInfo, label as devices_label
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
@@ -900,8 +900,44 @@ class MainWindow(QMainWindow):
             self.insp_eq_mid.setValue(cue.eq_mid)
             self.insp_eq_high.setValue(cue.eq_high)
             self._refresh_objects_tab(cue, editable)
+            self._refresh_waveform(cue)
         finally:
             self._insp_busy = False
+
+    def _refresh_waveform(self, cue: Cue | None = None) -> None:
+        """Load the selected cue's waveform, but only while the Time & Loops tab is showing.
+
+        Reading peaks means reading the whole file, so it is not done for cues the user is
+        only clicking past. waveform.peaks caches, so coming back to a cue is instant.
+        """
+        if not hasattr(self, "insp_wave") or self.insp_wave.is_dragging():
+            return
+        if self.insp_tabs.tabText(self.insp_tabs.currentIndex()) != "Time & Loops":
+            return
+        if cue is None:
+            row = self._selected_row()
+            cues = self.show_model.cues
+            cue = cues[row] if 0 <= row < len(cues) else None
+        if cue is None:
+            self.insp_wave.set_clip("", 0.0)
+            return
+        seconds = cue.duration_ms / 1000 if cue.duration_ms else self._file_seconds(cue)
+        self.insp_wave.set_clip(cue.file if cue.kind == "audio" else "", seconds)
+        self.insp_wave.set_markers(cue.loop_in, cue.loop_out)
+
+    def _file_seconds(self, cue: Cue) -> float:
+        """A cue's length from the file header, for cues that have not been probed yet."""
+        if cue.kind != "audio" or not cue.file:
+            return 0.0
+        try:
+            return probe_duration_ms(cue.file) / 1000
+        except Exception:
+            return 0.0
+
+    def _wave_markers_changed(self, loop_in: float, loop_out: float) -> None:
+        """A marker was dragged: update the spin boxes, which write back to the cue."""
+        self.insp_loop_in.setValue(loop_in)
+        self.insp_loop_out.setValue(loop_out)
 
     def _refresh_objects_tab(self, cue: Cue, editable: bool) -> None:
         """The Objects tab only applies to cues that put something on a screen."""
@@ -1298,13 +1334,17 @@ class MainWindow(QMainWindow):
             spin.setDecimals(3)
             spin.setSuffix(" s")
             spin.setMaximumWidth(140)
-        ggrid.addWidget(self.insp_loop, 0, 0, 1, 2)
-        ggrid.addWidget(QLabel("Loop in:"), 1, 0)
-        ggrid.addWidget(self.insp_loop_in, 1, 1)
-        ggrid.addWidget(QLabel("Loop out:"), 2, 0)
-        ggrid.addWidget(self.insp_loop_out, 2, 1)
-        ggrid.addWidget(QLabel("0 means the start (in) or the end (out) of the file."), 3, 0, 1, 2)
-        ggrid.setRowStretch(4, 1)
+        self.insp_wave = waveform.WaveformView()
+        ggrid.addWidget(self.insp_wave, 0, 0, 1, 3)
+        ggrid.addWidget(self.insp_loop, 1, 0, 1, 2)
+        ggrid.addWidget(QLabel("Loop in:"), 2, 0)
+        ggrid.addWidget(self.insp_loop_in, 2, 1)
+        ggrid.addWidget(QLabel("Loop out:"), 3, 0)
+        ggrid.addWidget(self.insp_loop_out, 3, 1)
+        ggrid.addWidget(QLabel("Drag the yellow markers to set the loop. 0 means the start or the end."),
+                        4, 0, 1, 3)
+        ggrid.setColumnStretch(2, 1)
+        ggrid.setRowStretch(5, 1)
         built_pages["Time & Loops"] = time_page
 
         # I/O: which outputs this cue's audio goes to.
@@ -1416,6 +1456,8 @@ class MainWindow(QMainWindow):
         for title in INSPECTOR_TABS:
             self.insp_stack.addWidget(built_pages[title])
         self.insp_tabs.currentChanged.connect(self.insp_stack.setCurrentIndex)
+        self.insp_tabs.currentChanged.connect(lambda _: self._refresh_waveform())
+        self.insp_wave.markersChanged.connect(self._wave_markers_changed)
         # The stack is as tall as its tallest page, so it is capped and scrolls instead of
         # pushing the cue list off a laptop screen.
         self.insp_scroll = QScrollArea()
@@ -1432,6 +1474,7 @@ class MainWindow(QMainWindow):
             self.insp_name, self.insp_pre, self.insp_post, self.insp_continue, self.insp_colour,
             self.insp_hotkey, self.insp_notes, self.insp_armed, self.insp_loop, self.insp_loop_in,
             self.insp_loop_out, self.insp_trigger_tc, self.insp_route_button, self.insp_volume,
+            self.insp_wave,
             self.insp_fade_in, self.insp_fade_out, self.insp_trim_in, self.insp_trim_out,
             self.insp_display, self.insp_opacity, self.insp_eq_low, self.insp_eq_mid,
             self.insp_eq_high,

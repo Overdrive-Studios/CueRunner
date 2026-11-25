@@ -156,3 +156,61 @@ def test_the_inspector_is_capped_so_the_cue_list_keeps_its_room(window):
     window.show()
     QtWidgets.QApplication.processEvents()
     assert window.table.height() >= 140
+
+
+@pytest.fixture
+def wav_file(tmp_path):
+    import soundfile as sf
+
+    from cuerunner import waveform
+
+    path = tmp_path / "cue.wav"
+    sf.write(path, np.full((48000 * 4, 1), 0.5, dtype=np.float32), 48000)
+    waveform.clear_cache()
+    return path
+
+
+def open_time_tab(window):
+    from cuerunner.main import INSPECTOR_TABS
+
+    window.insp_tabs.setCurrentIndex(INSPECTOR_TABS.index("Time & Loops"))
+
+
+def test_the_time_and_loops_tab_shows_the_waveform(window, wav_file):
+    from cuerunner.model import Cue
+
+    open_time_tab(window)
+    select(window, Cue(number="1", name="Song", kind="audio", file=str(wav_file),
+                       duration_ms=4000, loop_in=1.0, loop_out=3.0))
+    assert window.insp_wave.has_waveform()
+    assert window.insp_wave.markers() == (1.0, 3.0)
+
+
+def test_no_waveform_is_loaded_while_another_tab_is_open(window, wav_file):
+    """Reading peaks means reading the file, so it waits until the tab is actually showing."""
+    from cuerunner.model import Cue
+
+    window.insp_tabs.setCurrentIndex(0)  # Basics
+    select(window, Cue(number="1", name="Song", kind="audio", file=str(wav_file), duration_ms=4000))
+    assert not window.insp_wave.has_waveform()
+    open_time_tab(window)  # switching to the tab loads it
+    assert window.insp_wave.has_waveform()
+
+
+def test_dragging_a_marker_updates_the_cue(window, wav_file):
+    from cuerunner.model import Cue
+
+    open_time_tab(window)
+    select(window, Cue(number="1", name="Song", kind="audio", file=str(wav_file), duration_ms=4000))
+    window.insp_wave.markersChanged.emit(1.5, 2.5)
+    cue = window.show_model.cues[0]
+    assert (cue.loop_in, cue.loop_out) == (1.5, 2.5)
+    assert window.insp_loop_in.value() == pytest.approx(1.5)
+
+
+def test_a_cue_with_no_audio_file_shows_no_waveform(window):
+    from cuerunner.model import Cue
+
+    open_time_tab(window)
+    select(window, Cue(number="1", name="Note", kind="memo"))
+    assert not window.insp_wave.has_waveform()
