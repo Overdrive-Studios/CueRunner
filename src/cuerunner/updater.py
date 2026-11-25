@@ -78,15 +78,26 @@ def fetch_latest_release(timeout: float = 15) -> Release | None:
     return Release(tag=data.get("tag_name", ""), asset_name=asset["name"], asset_url=asset["browser_download_url"])
 
 
-def download(url: str, dest: Path, progress: Callable[[int], None] | None = None) -> Path:
+def download(
+    url: str,
+    dest: Path,
+    progress: Callable[[int], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> Path | None:
+    """Save url to dest. Reports percent (or -1 when the size is unknown). Returns None if cancelled."""
     with urllib.request.urlopen(url, timeout=60, context=_ssl_context()) as response, open(dest, "wb") as out:
         total = int(response.headers.get("Content-Length", 0))
         done = 0
         while chunk := response.read(256 * 1024):
+            if cancelled and cancelled():
+                break
             out.write(chunk)
             done += len(chunk)
-            if progress and total:
-                progress(min(100, done * 100 // total))
+            if progress:
+                progress(min(100, done * 100 // total) if total else -1)
+    if cancelled and cancelled():
+        dest.unlink(missing_ok=True)
+        return None
     return dest
 
 
