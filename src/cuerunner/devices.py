@@ -40,3 +40,11 @@ def enable_asio(environ: MutableMapping[str, str]) -> bool:
 
 def is_asio(host_api: str) -> bool:
     return host_api.strip().upper() == "ASIO"
+
+
+COMMON_RATES = (48000, 96000, 44100, 88200, 192000)
+
+
+def rate_choices(supported: list[int]) -> list[int]:
+    """Supported sample rates, 48 kHz first (SQ and Qu give their full channel count at 48 kHz), then the rest in order."""
+    return sorted(set(supported), key=lambda r: (r != 48000, r))

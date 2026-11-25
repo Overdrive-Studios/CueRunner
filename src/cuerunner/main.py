@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
 )
 
 from cuerunner import allenheath, console_ui, spotify, spotify_ui, updater
-from cuerunner.devices import label as devices_label
+from cuerunner.devices import DeviceInfo, label as devices_label
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
 from cuerunner.feedback import FeedbackSuppressor
@@ -395,8 +395,34 @@ class MainWindow(QMainWindow):
         name, ok = QInputDialog.getItem(self, "Output device", "Choose the output device:", names, 0, False)
         if not ok:
             return
+        device = devices[names.index(name)]
         try:
-            self._open_output(devices[names.index(name)])
+            from cuerunner import audio_io
+            from cuerunner.devices import rate_choices
+
+            channels = min(device.channels, MAX_CHANNELS)
+            rates = rate_choices(audio_io.supported_rates(device.index, channels))
+        except Exception as exc:
+            QMessageBox.critical(self, "Audio output", f"Could not check that device's sample rates:\n{exc}")
+            return
+        if not rates:
+            QMessageBox.warning(self, "Audio output", "That device did not accept any of the usual sample rates.")
+            return
+        labels = [f"{rate} Hz" + ("  (32 channels on SQ and Qu)" if rate == 48000 else "") for rate in rates]
+        picked, ok = QInputDialog.getItem(
+            self,
+            "Sample rate",
+            "Sample rate. SQ and Qu USB give their full channel count at 48 kHz; 96 kHz gives fewer channels.",
+            labels,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        rate = rates[labels.index(picked)]
+        device = DeviceInfo(device.index, device.name, device.channels, float(rate), device.host_api)
+        try:
+            self._open_output(device)
         except Exception as exc:
             QMessageBox.critical(
                 self,

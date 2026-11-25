@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from cuerunner.devices import DeviceInfo, enable_asio, ordered
+from cuerunner.devices import COMMON_RATES, DeviceInfo, enable_asio, ordered
 
 # ASIO has to be switched on before sounddevice (and its PortAudio DLL) is imported.
 enable_asio(os.environ)
@@ -15,7 +15,7 @@ from cuerunner.engine import Mixer  # noqa: E402
 
 BLOCK_SIZE = 256  # roughly 5 ms at 48 kHz; smaller is lower latency but needs a faster machine
 
-__all__ = ["DeviceInfo", "AudioOutput", "MicInput", "output_devices", "input_devices", "default_output", "ordered"]
+__all__ = ["DeviceInfo", "AudioOutput", "MicInput", "output_devices", "input_devices", "default_output", "ordered", "supported_rates"]
 
 
 def _host_api_name(device) -> str:
@@ -40,6 +40,18 @@ def _devices(direction: str) -> list[DeviceInfo]:
                 )
             )
     return ordered(devices)
+
+
+def supported_rates(device_index: int | None, channels: int) -> list[int]:
+    """Sample rates this output device accepts with this many channels."""
+    found = []
+    for rate in COMMON_RATES:
+        try:
+            sd.check_output_settings(device=device_index, channels=channels, samplerate=rate, dtype="float32")
+            found.append(rate)
+        except Exception:
+            continue
+    return found
 
 
 def output_devices() -> list[DeviceInfo]:
