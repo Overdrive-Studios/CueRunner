@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+from datetime import datetime
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -41,6 +43,7 @@ class Cue:
 class Pad:
     name: str = ""
     file: str = ""
+    route: list = field(default_factory=list)  # per clip channel, the 1-based outputs; empty = default
 
 
 @dataclass
@@ -48,6 +51,38 @@ class RadioSettings:
     music_folder: str = ""
     ident_folder: str = ""
     ident_every: int = 4
+    route: list = field(default_factory=list)  # per clip channel, the 1-based outputs; empty = default
+
+
+BACKUP_FOLDER = "backups"
+
+
+def _backup(path: Path, keep: int) -> Path | None:
+    """Copy the show file into a backups folder beside it before it is overwritten.
+
+    Keeps the newest `keep` backups for that show. A failed backup never blocks the save.
+    """
+    target = _backup_target(path)
+    try:
+        target.parent.mkdir(exist_ok=True)
+        shutil.copy2(path, target)
+        _prune(path, keep)
+        return target
+    except OSError:
+        return None
+
+
+def _backup_target(path: Path) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    return path.parent / BACKUP_FOLDER / f"{path.stem}-{stamp}{path.suffix}"
+
+
+def _prune(path: Path, keep: int) -> None:
+    """Delete the oldest backups for this show so only the newest `keep` remain."""
+    folder = path.parent / BACKUP_FOLDER
+    backups = sorted(folder.glob(f"{path.stem}-*{path.suffix}"))
+    for stale in backups[:-keep] if keep > 0 else backups:
+        stale.unlink()
 
 
 def _empty_pads() -> list[Pad]:
@@ -76,7 +111,24 @@ class Show:
                 continue
         return str(max(numbers, default=0) + 1)
 
-    def save(self, path: Path) -> None:
+    def save(self, path: Path, keep_backups: int = 20) -> None:
+        if path.exists():
+            _backup(path, keep_backups)
+        path.write_text(self.to_json(), encoding="utf-8")
+
+    def snapshot(self, path: Path, keep: int = 20) -> Path | None:
+        """Write the current state into the backups folder without touching the show file."""
+        folder = path.parent / BACKUP_FOLDER
+        target = _backup_target(path)
+        try:
+            folder.mkdir(exist_ok=True)
+            target.write_text(self.to_json(), encoding="utf-8")
+            _prune(path, keep)
+            return target
+        except OSError:
+            return None
+
+    def to_json(self) -> str:
         data = {
             "format_version": FORMAT_VERSION,
             "name": self.name,
@@ -90,7 +142,7 @@ class Show:
             "console_host": self.console_host,
             "console_family": self.console_family,
         }
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return json.dumps(data, indent=2)
 
     @classmethod
     def load(cls, path: Path) -> "Show":

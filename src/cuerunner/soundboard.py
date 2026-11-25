@@ -21,6 +21,7 @@ class Soundboard(QWidget):
     padPressed = Signal(int)  # absolute pad index, 0..63
     padAssign = Signal(int)
     padClear = Signal(int)
+    padRouting = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -72,5 +73,6 @@ class Soundboard(QWidget):
         menu = QMenu(self)
         index = self._index(slot)
         menu.addAction("Assign file...", lambda: self.padAssign.emit(index))
+        menu.addAction("Routing...", lambda: self.padRouting.emit(index))
         menu.addAction("Clear", lambda: self.padClear.emit(index))
         menu.exec(button.mapToGlobal(pos))

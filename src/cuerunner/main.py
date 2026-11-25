@@ -70,6 +70,7 @@ from cuerunner.theme import apply_dark_theme
 from cuerunner.timecode import format_clock, format_duration, format_hms
 from cuerunner.version import __version__
 
+BACKUP_INTERVAL_MS = 15 * 60 * 1000  # automatic show snapshot every 15 minutes
 COLUMNS = ["#", "Name", "Length", "Fade In", "Fade Out", "Loop", "Then", "Progress", "Remaining", "Hotkey", "File"]
 PROGRESS_COL = 7
 REMAINING_COL = 8
@@ -351,6 +352,11 @@ class MainWindow(QMainWindow):
         self.clock_timer.timeout.connect(self._tick)
         self.clock_timer.start()
 
+        self.backup_timer = QTimer(self)
+        self.backup_timer.setInterval(BACKUP_INTERVAL_MS)
+        self.backup_timer.timeout.connect(self._auto_backup)
+        self.backup_timer.start()
+
         self._open_default_output()
         self._refresh_title()
         self.resize(1200, 820)
@@ -460,6 +466,14 @@ class MainWindow(QMainWindow):
             ("Remove Cue", self.remove_cue),
         ]:
             bar.addAction(label, handler)
+        bar.addSeparator()
+        self.pads_action = bar.addAction("Pads")
+        self.pads_action.setCheckable(True)
+        self.pads_action.setChecked(True)
+        self.pads_action.toggled.connect(self._toggle_pads)
+
+    def _toggle_pads(self, shown: bool) -> None:
+        self.soundboard.setVisible(shown)
 
     def _build_menus(self) -> None:
         audio_menu = self.menuBar().addMenu("Audio")
@@ -487,6 +501,7 @@ class MainWindow(QMainWindow):
         audio_menu.addAction("Start Venue Radio", self.start_radio)
         audio_menu.addAction("Stop Venue Radio", self.stop_radio)
         audio_menu.addAction("Venue Radio Settings...", self.radio_settings)
+        audio_menu.addAction("Venue Radio Routing...", self.radio_routing)
         help_menu = self.menuBar().addMenu("Help")
         help_menu.addAction("Check for Updates...", self.check_for_updates)
         help_menu.addAction(f"About CueRunner {__version__}", self.about)
@@ -569,6 +584,7 @@ class MainWindow(QMainWindow):
         self.soundboard.padPressed.connect(self._on_pad_pressed)
         self.soundboard.padAssign.connect(self._assign_pad)
         self.soundboard.padClear.connect(self._clear_pad)
+        self.soundboard.padRouting.connect(self._pad_routing)
         bottom.addWidget(self.countdown, 1)
         bottom.addWidget(self.soundboard, 3)
         layout.addLayout(bottom)
@@ -691,6 +707,11 @@ class MainWindow(QMainWindow):
         for cue in self.show_model.cues:
             if cue.duration_ms == 0:
                 self._probe_duration(cue)
+
+    def _auto_backup(self) -> None:
+        """Every 15 minutes, keep a snapshot of the show next to the show file."""
+        if self.show_path is not None:
+            self.show_model.snapshot(self.show_path)
 
     def save_show(self) -> None:
         if self.show_path is None:
@@ -929,7 +950,14 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Cannot play pad", f"{pad.name}\n\n{exc}")
             return
-        self.mixer.add(Voice(clip=clip, matrix=default_matrix(clip.channels, self.mixer.out_channels)))
+        self.mixer.add(Voice(clip=clip, matrix=route_matrix(pad.route, clip.channels, self.mixer.out_channels)))
+
+    def _pad_routing(self, index: int) -> None:
+        pad = self.show_model.pads[index]
+        out = self.mixer.out_channels if self.mixer is not None else 2
+        dialog = RoutingDialog(pad.route, out, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            pad.route = dialog.result_route()
 
     def _assign_pad(self, index: int) -> None:
         filename, _ = QFileDialog.getOpenFileName(self, "Assign pad", "", AUDIO_FILTER)
@@ -1235,6 +1263,12 @@ class MainWindow(QMainWindow):
 
     # --- Venue radio --------------------------------------------------
 
+    def radio_routing(self) -> None:
+        out = self.mixer.out_channels if self.mixer is not None else 2
+        dialog = RoutingDialog(self.show_model.radio.route, out, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.show_model.radio.route = dialog.result_route()
+
     def radio_settings(self) -> None:
         settings = self.show_model.radio
         music = QFileDialog.getExistingDirectory(self, "Music folder", settings.music_folder)
@@ -1281,7 +1315,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Venue Radio", f"Could not play {Path(path).name}:\n{exc}")
             self.stop_radio()
             return
-        voice = Voice(clip=clip, matrix=default_matrix(clip.channels, self.mixer.out_channels), bed=True, tag=kind)
+        voice = Voice(clip=clip, matrix=route_matrix(self.show_model.radio.route, clip.channels, self.mixer.out_channels), bed=True, tag=kind)
         self.mixer.add(voice)
         self._radio_voice = voice
 
