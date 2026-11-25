@@ -678,6 +678,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.show_model = Show()
         self.show_path: Path | None = None
+        self._saved_json = self.show_model.to_json()  # the show as it was last saved or opened
         self._shortcuts: list[QShortcut] = []
         self._clips: dict[str, Clip] = {}
         self._cue_voices: list[Voice] = []
@@ -715,6 +716,7 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_menus()
         self._last_row = -1  # the last row that was highlighted; GO continues from it
+        self._quitting = False  # guards against the quit being handled twice
         self._build_central()
         self.setAcceptDrops(True)  # drop audio, video or MIDI files onto the window to add cues
         QApplication.instance().installEventFilter(self)  # clicks elsewhere clear the highlight
@@ -739,6 +741,10 @@ class MainWindow(QMainWindow):
         self._fit_to_screen()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        # A window that was never shown has nobody to ask, so it just closes.
+        if self.isVisible() and not self.confirm_discard("closing"):
+            event.ignore()
+            return
         QApplication.instance().removeEventFilter(self)
         self._stop_timecode()
         self._stop_midifile()
@@ -1064,6 +1070,10 @@ class MainWindow(QMainWindow):
         file_menu.addAction("New Show", self.new_show, QKeySequence(QKeySequence.StandardKey.New))
         file_menu.addAction("Open Show...", self.open_show, QKeySequence(QKeySequence.StandardKey.Open))
         file_menu.addAction("Save Show", self.save_show, QKeySequence(QKeySequence.StandardKey.Save))
+        # Quit goes through the window so unsaved work is noticed. On a Mac this lands in
+        # the application menu and replaces the one Qt would add for itself.
+        quit_action = file_menu.addAction("Quit", self.close, QKeySequence(QKeySequence.StandardKey.Quit))
+        quit_action.setMenuRole(QAction.MenuRole.QuitRole)
         cues_menu = self.menuBar().addMenu("Cues")
         cues_menu.addAction("Add Audio Cue...", self.add_audio_cue)
         cues_menu.addAction("Add Video Cue...", self.add_video_cue)
@@ -1559,10 +1569,14 @@ class MainWindow(QMainWindow):
 
     def _refresh_title(self) -> None:
         name = self.show_path.name if self.show_path else "Untitled"
-        self.setWindowTitle(f"CueRunner - {name}")
+        unsaved = self.has_unsaved_changes()
+        self.setWindowTitle(f"CueRunner - {name}{' •' if unsaved else ''}")
+        self.setWindowModified(unsaved)
 
     def _refresh_table(self) -> None:
         cues = self.show_model.cues
+        if hasattr(self, "_saved_json"):
+            self._refresh_title()  # the title carries a dot while there is unsaved work
         if hasattr(self, "cue_count_label"):
             self.cue_count_label.setText(f"{len(cues)} cue{'' if len(cues) == 1 else 's'} in 1 list")
         playhead = self._playhead_row()
@@ -1658,6 +1672,16 @@ class MainWindow(QMainWindow):
         return 0
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt naming
+        # Quitting (Cmd+Q, or the dock) does not go through closeEvent on its own, so it is
+        # routed through the window here; a cancelled close calls the quit off too.
+        if event.type() == QEvent.Type.Quit and not self._quitting:
+            self._quitting = True
+            try:
+                if not self.close():
+                    return True
+            finally:
+                self._quitting = False
+            return False
         if event.type() == QEvent.Type.MouseButtonPress and isinstance(obj, QWidget) and obj.window() is self:
             self._on_outside_click(obj)
         return False
@@ -1684,13 +1708,17 @@ class MainWindow(QMainWindow):
     # --- Show file actions --------------------------------------------
 
     def new_show(self) -> None:
+        if not self.confirm_discard("starting a new show"):
+            return
         self.panic()
         self.show_model = Show()
         self.show_path = None
         self._refresh_table()
-        self._refresh_title()
+        self._mark_saved()
 
     def open_show(self) -> None:
+        if not self.confirm_discard("opening another show"):
+            return
         filename, _ = QFileDialog.getOpenFileName(self, "Open show", "", SHOW_FILTER)
         if filename:
             self.open_show_path(Path(filename))
@@ -1705,15 +1733,42 @@ class MainWindow(QMainWindow):
         launcher.remember_show(path)
         self.panic()
         self._refresh_table()
-        self._refresh_title()
         for cue in self.show_model.cues:
             if cue.duration_ms == 0:
                 self._probe_duration(cue)
+        # Probing fills in durations, so the baseline is taken once that has settled.
+        self._mark_saved()
 
     def _auto_backup(self) -> None:
         """Every 15 minutes, keep a snapshot of the show next to the show file."""
         if self.show_path is not None:
             self.show_model.snapshot(self.show_path)
+
+    def _mark_saved(self) -> None:
+        """Remember the show as it stands now, so later edits can be spotted."""
+        self._saved_json = self.show_model.to_json()
+        self._refresh_title()
+
+    def has_unsaved_changes(self) -> bool:
+        return self.show_model.to_json() != self._saved_json
+
+    def confirm_discard(self, action: str) -> bool:
+        """Offer to save before something that would lose the show. True means carry on."""
+        if not self.has_unsaved_changes():
+            return True
+        name = self.show_path.name if self.show_path else "this show"
+        answer = QMessageBox.question(
+            self, "Unsaved changes", f"Save your changes to {name} before {action}?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if answer == QMessageBox.StandardButton.Cancel:
+            return False
+        if answer == QMessageBox.StandardButton.Save:
+            self.save_show()
+            return not self.has_unsaved_changes()  # the Save As dialog may have been cancelled
+        return True
 
     def save_show(self) -> None:
         if self.show_path is None:
@@ -1727,7 +1782,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Could not save show", str(exc))
             return
         launcher.remember_show(self.show_path)
-        self._refresh_title()
+        self._mark_saved()
 
     # --- Cue actions --------------------------------------------------
 
