@@ -14,6 +14,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QFont, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QFrame,
     QAbstractItemView,
     QApplication,
     QCheckBox,
@@ -36,10 +37,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
-    QMenu,
-    QSizePolicy,
     QToolButton,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -72,6 +70,45 @@ from cuerunner.timecode import format_clock, format_duration, format_hms
 from cuerunner.version import __version__
 
 BACKUP_INTERVAL_MS = 15 * 60 * 1000  # automatic show snapshot every 15 minutes
+MAIN_QSS = """
+QWidget#mainWindow { background: #3b3b3f; }
+QPushButton#bigGo {
+    background: #c9c3ef; color: #ffffff; border: 1px solid #a9a2db; border-radius: 4px;
+    font-size: 40px; font-weight: 600;
+}
+QPushButton#bigGo:hover { background: #d7d2f5; }
+QPushButton#bigGo:pressed { background: #b4adde; }
+QLabel#standby {
+    background: #56565b; color: #d8d8dc; border: 1px solid #47474c; border-radius: 3px;
+    padding: 10px 12px; font-size: 16px;
+}
+QFrame#clockBar { background: #4c4c51; border: 1px solid #47474c; border-radius: 3px; }
+QToolButton#toolButton {
+    background: #4a4a4f; color: #f0f0f2; border: 1px solid #5a5a60; border-radius: 3px;
+    padding: 6px 12px; font-size: 13px;
+}
+QToolButton#toolButton:hover { background: #56565c; }
+QToolButton#toolButton:checked { background: #3b82d6; border-color: #3b82d6; color: #ffffff; }
+QToolButton#toolButton[kind="stop"] { background: #5a4a4a; }
+QToolButton#toolButton[kind="pause"] { background: #5e5340; }
+QToolButton#toolButton[kind="panic"] { background: #6e1c1c; border-color: #7e2a2a; }
+QToolButton#toolButton[kind="panic"]:hover { background: #8a2626; }
+QTableWidget {
+    background: #424246; alternate-background-color: #3a3a3e; color: #ececf0;
+    border: 1px solid #2e2e32; gridline-color: #2e2e32; selection-background-color: #3b82d6;
+    selection-color: #ffffff; font-size: 13px;
+}
+QHeaderView::section {
+    background: #6a6a70; color: #f5f5f7; border: 0; border-right: 1px solid #4f4f55;
+    padding: 5px 8px; font-size: 13px; font-weight: 600;
+}
+QPushButton#modeButton {
+    background: #56565b; color: #d8d8dc; border: 1px solid #47474c; padding: 4px 16px; font-size: 13px;
+}
+QPushButton#modeButton:checked { background: #6a6a70; color: #ffffff; }
+QLabel#cueCount { color: #c8c8cc; font-size: 13px; }
+"""
+
 COLUMNS = ["#", "Name", "Length", "Fade In", "Fade Out", "Loop", "Then", "Progress", "Remaining", "Hotkey", "File"]
 PROGRESS_COL = 7
 REMAINING_COL = 8
@@ -482,39 +519,7 @@ class MainWindow(QMainWindow):
     # --- UI setup -----------------------------------------------------
 
     def _build_toolbar(self) -> None:
-        """Top bar: file actions on the left, Pads and Settings on the right. Cue commands live in the Cues menu."""
-        bar = QToolBar("File", self)
-        bar.setMovable(False)
-        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.addToolBar(bar)
-        bar.addAction("New", self.new_show)
-        bar.addAction("Open...", self.open_show)
-        bar.addAction("Save", self.save_show)
-        bar.addSeparator()
-        add_button = QToolButton()
-        add_button.setText("Add Cue")
-        add_button.setToolTip("Add an audio, video, Spotify or console cue")
-        add_menu = QMenu(add_button)
-        add_menu.addAction("Audio Cue...", self.add_audio_cue)
-        add_menu.addAction("Video Cue...", self.add_video_cue)
-        add_menu.addAction("Camera Cue...", self.add_camera_cue)
-        add_menu.addAction("Spotify Cue...", self.add_spotify_cue)
-        add_menu.addAction("Console Cue...", self.add_console_cue)
-        add_button.setMenu(add_menu)
-        add_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        add_button.setStyleSheet("QToolButton { padding: 4px 10px; }")
-        bar.addWidget(add_button)
-        bar.addSeparator()
-        self.pads_action = bar.addAction("Pads")
-        self.pads_action.setCheckable(True)
-        self.pads_action.setChecked(True)
-        self.pads_action.setToolTip("Show or hide the soundboard pads")
-        self.pads_action.toggled.connect(self._toggle_pads)
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        bar.addWidget(spacer)
-        settings_action = bar.addAction("Settings...", self.open_settings)
-        settings_action.setToolTip("Audio, video, console and other settings")
+        """No toolbar: the cue buttons sit above the cue list, as in QLab. File actions are in the File menu."""
 
     def _camera_for(self, cue: Cue) -> str:
         """The camera name for a camera cue, looked up from its video input patch."""
@@ -527,6 +532,10 @@ class MainWindow(QMainWindow):
         self.soundboard.setVisible(shown)
 
     def _build_menus(self) -> None:
+        file_menu = self.menuBar().addMenu("File")
+        file_menu.addAction("New Show", self.new_show, QKeySequence(QKeySequence.StandardKey.New))
+        file_menu.addAction("Open Show...", self.open_show, QKeySequence(QKeySequence.StandardKey.Open))
+        file_menu.addAction("Save Show", self.save_show, QKeySequence(QKeySequence.StandardKey.Save))
         cues_menu = self.menuBar().addMenu("Cues")
         cues_menu.addAction("Add Audio Cue...", self.add_audio_cue)
         cues_menu.addAction("Add Video Cue...", self.add_video_cue)
@@ -587,48 +596,77 @@ class MainWindow(QMainWindow):
 
     def _build_central(self) -> None:
         container = QWidget(self)
+        container.setObjectName("mainWindow")
+        container.setStyleSheet(MAIN_QSS)
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
 
-        status = QHBoxLayout()
+        # Top: big GO, then the standby cue name and the clock line beside it.
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        self.go_button = QPushButton("GO")
+        self.go_button.setObjectName("bigGo")
+        self.go_button.setToolTip("Start the selected cue (Space)")
+        self.go_button.clicked.connect(self.go)
+        self.go_button.setFixedSize(150, 96)
+        top.addWidget(self.go_button)
+
+        screens = QVBoxLayout()
+        screens.setSpacing(6)
+        self.now_label = QLabel("[no cue on standby]")
+        self.now_label.setObjectName("standby")
+        screens.addWidget(self.now_label)
+        clock = QFrame()
+        clock.setObjectName("clockBar")
+        clock_row = QHBoxLayout(clock)
+        clock_row.setContentsMargins(10, 4, 10, 4)
         self.trt_label = self._status_value("0:00:00")
         self.track_label = self._status_value(format_clock(0))
         self.remaining_label = self._status_value(format_clock(0))
         self.wall_label = self._status_value("--:--:--")
-        status.addWidget(self._status_title("TRT"))
-        status.addWidget(self.trt_label)
-        status.addSpacing(28)
-        status.addWidget(self._status_title("TRACK"))
-        status.addWidget(self.track_label)
-        status.addSpacing(28)
-        status.addWidget(self._status_title("REMAINING"))
-        status.addWidget(self.remaining_label)
-        status.addStretch(1)
-        status.addWidget(self.wall_label)
-        layout.addLayout(status)
+        clock_row.addWidget(self._status_title("TRT"))
+        clock_row.addWidget(self.trt_label)
+        clock_row.addSpacing(22)
+        clock_row.addWidget(self._status_title("TRACK"))
+        clock_row.addWidget(self.track_label)
+        clock_row.addSpacing(22)
+        clock_row.addWidget(self._status_title("REMAINING"))
+        clock_row.addWidget(self.remaining_label)
+        clock_row.addStretch(1)
+        clock_row.addWidget(self.wall_label)
+        screens.addWidget(clock)
+        top.addLayout(screens, 1)
+        layout.addLayout(top)
 
-        transport = QHBoxLayout()
-        self.go_button = QPushButton("GO  (Space)")
-        self.go_button.setObjectName("go")
-        self.go_button.clicked.connect(self.go)
-        self.stop_button = QPushButton("STOP")
-        self.stop_button.setObjectName("stop")
-        self.stop_button.clicked.connect(self.stop)
-        self.pause_button = QPushButton("PAUSE")
-        self.pause_button.setObjectName("pause")
-        self.pause_button.clicked.connect(self.toggle_pause)
-        self.panic_button = QPushButton("PANIC  (Esc)")
-        self.panic_button.setObjectName("panic")
-        self.panic_button.clicked.connect(self.panic)
-        transport.addWidget(self.go_button, 3)
-        transport.addWidget(self.stop_button, 2)
-        transport.addWidget(self.pause_button, 2)
-        transport.addWidget(self.panic_button, 2)
-        layout.addLayout(transport)
-
-        self.now_label = QLabel("Standby")
-        self.now_label.setObjectName("now")
-        layout.addWidget(self.now_label)
+        # Button row: cue types on the left, transport in the middle, pads on the right.
+        tools = QHBoxLayout()
+        tools.setSpacing(4)
+        for text, tip, slot in [
+            ("Audio", "Add an audio cue", self.add_audio_cue),
+            ("Video", "Add a video cue", self.add_video_cue),
+            ("Camera", "Add a camera cue", self.add_camera_cue),
+            ("Spotify", "Add a Spotify cue", self.add_spotify_cue),
+            ("Console", "Add an Allen & Heath console cue", self.add_console_cue),
+        ]:
+            tools.addWidget(self._tool_button(text, tip, slot))
+        tools.addSpacing(16)
+        self.stop_button = self._tool_button("Stop", "Fade out playing cues over their fade out time", self.stop)
+        self.stop_button.setProperty("kind", "stop")
+        self.pause_button = self._tool_button("Pause", "Pause or resume all sound", self.toggle_pause)
+        self.pause_button.setProperty("kind", "pause")
+        self.panic_button = self._tool_button("Panic", "Stop everything now, with no fade (Esc)", self.panic)
+        self.panic_button.setProperty("kind", "panic")
+        tools.addWidget(self.stop_button)
+        tools.addWidget(self.pause_button)
+        tools.addWidget(self.panic_button)
+        tools.addStretch(1)
+        self.pads_button = self._tool_button("Pads", "Show or hide the soundboard pads", None)
+        self.pads_button.setCheckable(True)
+        self.pads_button.setChecked(True)
+        self.pads_button.toggled.connect(self._toggle_pads)
+        tools.addWidget(self.pads_button)
+        layout.addLayout(tools)
 
         self.table = QTableWidget(0, len(COLUMNS), self)
         self.table.setHorizontalHeaderLabels(COLUMNS)
@@ -636,6 +674,7 @@ class MainWindow(QMainWindow):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setShowGrid(False)
+        self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -658,7 +697,50 @@ class MainWindow(QMainWindow):
         bottom.addWidget(self.soundboard, 3)
         layout.addLayout(bottom)
 
+        # Footer: Edit or Show mode, the cue count, and settings.
+        footer = QHBoxLayout()
+        footer.setSpacing(0)
+        self.edit_button = QPushButton("Edit")
+        self.show_button = QPushButton("Show")
+        for button in (self.edit_button, self.show_button):
+            button.setObjectName("modeButton")
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.edit_button.setChecked(True)
+        self.edit_button.clicked.connect(lambda: self._set_mode(editing=True))
+        self.show_button.clicked.connect(lambda: self._set_mode(editing=False))
+        footer.addWidget(self.edit_button)
+        footer.addWidget(self.show_button)
+        footer.addStretch(1)
+        self.cue_count_label = QLabel("0 cues in 1 list")
+        self.cue_count_label.setObjectName("cueCount")
+        footer.addWidget(self.cue_count_label)
+        footer.addStretch(1)
+        settings_button = self._tool_button("Settings", "Audio, video, console and other settings", None)
+        settings_button.clicked.connect(lambda: self.open_settings())
+        settings_button.setShortcut(QKeySequence(QKeySequence.StandardKey.Preferences))
+        footer.addWidget(settings_button)
+        layout.addLayout(footer)
+
+        self._editing = True
         self.setCentralWidget(container)
+
+    def _tool_button(self, text: str, tip: str, slot) -> QToolButton:
+        button = QToolButton()
+        button.setObjectName("toolButton")
+        button.setText(text)
+        button.setToolTip(tip)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        if slot is not None:
+            button.clicked.connect(lambda _checked=False, f=slot: f())
+        return button
+
+    def _set_mode(self, editing: bool) -> None:
+        """Edit lets you change cues; Show locks the list so nothing changes by accident during a show."""
+        self._editing = editing
+        self.edit_button.setChecked(editing)
+        self.show_button.setChecked(not editing)
 
     def _refresh_title(self) -> None:
         name = self.show_path.name if self.show_path else "Untitled"
@@ -666,6 +748,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_table(self) -> None:
         cues = self.show_model.cues
+        if hasattr(self, "cue_count_label"):
+            self.cue_count_label.setText(f"{len(cues)} cue{'' if len(cues) == 1 else 's'} in 1 list")
         playhead = self._playhead_row()
         playing_row = self._row_of(self._playing_cue)
 
@@ -941,7 +1025,7 @@ class MainWindow(QMainWindow):
             cue.duration_ms = 0
 
     def edit_row(self, row: int) -> None:
-        if not 0 <= row < len(self.show_model.cues):
+        if not self._editing or not 0 <= row < len(self.show_model.cues):
             return
         cue = self.show_model.cues[row]
         dialog = CueDialog(
