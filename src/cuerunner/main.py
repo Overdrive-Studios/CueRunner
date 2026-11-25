@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QGridLayout,
     QScrollArea,
@@ -43,6 +44,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
@@ -900,8 +902,12 @@ class MainWindow(QMainWindow):
             self.insp_volume.setValue(fx.gain_to_db(cue.volume))
             self.insp_fade_in.setValue(cue.fade_in)
             self.insp_fade_out.setValue(cue.fade_out)
-            self.insp_trim_in.setValue(cue.trim_in)
-            self.insp_trim_out.setValue(cue.trim_out)
+            self.insp_start_time.setValue(cue.trim_in)
+            self.insp_end_time.setValue(cue.trim_out)
+            self.insp_trim.setValue(cue.trim_db)
+            self.insp_play_count.setValue(max(1, cue.play_count))
+            self.insp_infinite.setChecked(cue.loop)
+            self.insp_play_once.setChecked(not cue.loop)
             self.insp_eq_low.setValue(cue.eq_low)
             self.insp_eq_mid.setValue(cue.eq_mid)
             self.insp_eq_high.setValue(cue.eq_high)
@@ -991,7 +997,7 @@ class MainWindow(QMainWindow):
                 return  # keep the last valid trigger until the text is fixed
         self.insp_trigger_tc.setStyleSheet("")
         cue.trigger_tc = trigger
-        cue.loop = self.insp_loop.isChecked()
+        cue.loop = self.insp_loop.isChecked() or self.insp_infinite.isChecked()
         cue.loop_in = self.insp_loop_in.value()
         cue.loop_out = self.insp_loop_out.value()
         name = self.insp_name.text().strip()
@@ -1007,8 +1013,10 @@ class MainWindow(QMainWindow):
         cue.volume = fx.db_to_gain(self.insp_volume.value())
         cue.fade_in = self.insp_fade_in.value()
         cue.fade_out = self.insp_fade_out.value()
-        cue.trim_in = self.insp_trim_in.value()
-        cue.trim_out = self.insp_trim_out.value()
+        cue.trim_in = self.insp_start_time.value()
+        cue.trim_out = self.insp_end_time.value()
+        cue.trim_db = self.insp_trim.value()
+        cue.play_count = self.insp_play_count.value()
         cue.eq_low = self.insp_eq_low.value()
         cue.eq_mid = self.insp_eq_mid.value()
         cue.eq_high = self.insp_eq_high.value()
@@ -1345,16 +1353,38 @@ class MainWindow(QMainWindow):
             spin.setSuffix(" s")
             spin.setMaximumWidth(140)
         self.insp_wave = waveform.WaveformView()
-        ggrid.addWidget(self.insp_wave, 0, 0, 1, 3)
-        ggrid.addWidget(self.insp_loop, 1, 0, 1, 2)
-        ggrid.addWidget(QLabel("Loop in:"), 2, 0)
-        ggrid.addWidget(self.insp_loop_in, 2, 1)
-        ggrid.addWidget(QLabel("Loop out:"), 3, 0)
-        ggrid.addWidget(self.insp_loop_out, 3, 1)
-        ggrid.addWidget(QLabel("Drag the yellow markers to set the loop. 0 means the start or the end."),
-                        4, 0, 1, 3)
+        self.insp_start_time = QDoubleSpinBox()
+        self.insp_end_time = QDoubleSpinBox()
+        for spin in (self.insp_start_time, self.insp_end_time):
+            spin.setRange(0, 86400)
+            spin.setDecimals(3)
+            spin.setSuffix(" s")
+            spin.setMaximumWidth(130)
+        self.insp_play_once = QRadioButton("Play")
+        self.insp_play_count = QSpinBox()
+        self.insp_play_count.setRange(1, 999)
+        self.insp_play_count.setMaximumWidth(70)
+        self.insp_infinite = QRadioButton("Infinite loop  \u221e")
+        plays = QButtonGroup(time_page)
+        plays.addButton(self.insp_play_once)
+        plays.addButton(self.insp_infinite)
+        self._insp_plays_group = plays
+        ggrid.addWidget(QLabel("Start time:"), 0, 0)
+        ggrid.addWidget(self.insp_start_time, 0, 1)
+        ggrid.addWidget(QLabel("End time:"), 1, 0)
+        ggrid.addWidget(self.insp_end_time, 1, 1)
+        ggrid.addWidget(self.insp_play_once, 2, 0)
+        ggrid.addWidget(self.insp_play_count, 2, 1)
+        ggrid.addWidget(self.insp_infinite, 3, 0, 1, 2)
+        ggrid.addWidget(self.insp_wave, 0, 2, 4, 1)
+        ggrid.addWidget(QLabel("Loop in:"), 4, 0)
+        ggrid.addWidget(self.insp_loop_in, 4, 1)
+        ggrid.addWidget(QLabel("Loop out:"), 5, 0)
+        ggrid.addWidget(self.insp_loop_out, 5, 1)
+        ggrid.addWidget(self.insp_loop, 4, 2)
+        ggrid.addWidget(QLabel("Drag the yellow markers on the waveform to set the loop."), 5, 2)
         ggrid.setColumnStretch(2, 1)
-        ggrid.setRowStretch(5, 1)
+        ggrid.setRowStretch(6, 1)
         built_pages["Time & Loops"] = time_page
 
         # I/O: which outputs this cue's audio goes to.
@@ -1403,19 +1433,18 @@ class MainWindow(QMainWindow):
         trim_page.setObjectName("inspectorPage")
         trgrid = QGridLayout(trim_page)
         trgrid.setContentsMargins(12, 10, 12, 10)
-        self.insp_trim_in = QDoubleSpinBox()
-        self.insp_trim_out = QDoubleSpinBox()
-        for spin in (self.insp_trim_in, self.insp_trim_out):
-            spin.setRange(0, 86400)
-            spin.setDecimals(3)
-            spin.setSuffix(" s")
-            spin.setMaximumWidth(140)
-        trgrid.addWidget(QLabel("Start at:"), 0, 0)
-        trgrid.addWidget(self.insp_trim_in, 0, 1)
-        trgrid.addWidget(QLabel("Stop at:"), 1, 0)
-        trgrid.addWidget(self.insp_trim_out, 1, 1)
-        trgrid.addWidget(QLabel("Stop at 0 plays to the end of the file."), 2, 0, 1, 2)
-        trgrid.setRowStretch(3, 1)
+        self.insp_trim = QDoubleSpinBox()
+        self.insp_trim.setRange(-60.0, 12.0)
+        self.insp_trim.setDecimals(1)
+        self.insp_trim.setSuffix(" dB")
+        self.insp_trim.setMaximumWidth(140)
+        note = QLabel("Trim is an overall adjustment to the volume of the cue.\n"
+                      "Trim cannot be changed by Fade cues.")
+        note.setWordWrap(True)
+        trgrid.addWidget(note, 0, 0, 1, 2)
+        trgrid.addWidget(QLabel("Trim:"), 1, 0)
+        trgrid.addWidget(self.insp_trim, 1, 1)
+        trgrid.setRowStretch(2, 1)
         built_pages["Trim"] = trim_page
 
         # Objects: where a video, camera or text cue appears.
@@ -1485,14 +1514,17 @@ class MainWindow(QMainWindow):
             self.insp_hotkey, self.insp_notes, self.insp_armed, self.insp_loop, self.insp_loop_in,
             self.insp_loop_out, self.insp_trigger_tc, self.insp_route_button, self.insp_volume,
             self.insp_wave,
-            self.insp_fade_in, self.insp_fade_out, self.insp_trim_in, self.insp_trim_out,
+            self.insp_fade_in, self.insp_fade_out, self.insp_start_time, self.insp_end_time,
+            self.insp_trim, self.insp_play_once, self.insp_play_count, self.insp_infinite,
             self.insp_display, self.insp_opacity, self.insp_eq_low, self.insp_eq_mid,
             self.insp_eq_high,
         ]
         self.insp_route_button.clicked.connect(self._inspector_routing)
-        for spin in (self.insp_volume, self.insp_fade_in, self.insp_fade_out, self.insp_trim_in,
-                     self.insp_trim_out, self.insp_eq_low, self.insp_eq_mid, self.insp_eq_high):
+        for spin in (self.insp_volume, self.insp_fade_in, self.insp_fade_out, self.insp_start_time,
+                     self.insp_end_time, self.insp_trim, self.insp_play_count,
+                     self.insp_eq_low, self.insp_eq_mid, self.insp_eq_high):
             spin.valueChanged.connect(self._inspector_apply)
+        self.insp_play_once.toggled.connect(self._inspector_apply)
         self.insp_opacity.valueChanged.connect(self._inspector_apply)
         self.insp_display.currentIndexChanged.connect(self._inspector_apply)
         self.insp_trigger_tc.editingFinished.connect(self._inspector_apply)
@@ -2099,10 +2131,12 @@ class MainWindow(QMainWindow):
 
     def _apply_levels(self, voice: Voice, cue: Cue, clip) -> None:
         """Level, trim points and EQ from the inspector's Levels, Trim and Audio FX tabs."""
-        voice.gain = max(0.0, cue.volume)
+        voice.gain = max(0.0, cue.volume) * fx.db_to_gain(cue.trim_db)
         start, end = self._trim_frames(cue)
-        voice.position = min(max(start, 0), max(clip.frames - 1, 0))
+        voice.start = min(max(start, 0), max(clip.frames - 1, 0))
+        voice.position = voice.start
         voice.end = end
+        voice.plays = max(1, cue.play_count)
         voice.fx = self._cue_eq(cue, clip.channels)
 
     def _start_midifile(self, cue: Cue) -> None:

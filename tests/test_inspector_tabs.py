@@ -64,18 +64,49 @@ def test_the_level_reaches_the_playing_voice(window):
     assert voice.gain == pytest.approx(0.25)
 
 
-def test_the_trim_tab_sets_where_the_file_starts_and_stops(window):
+def test_start_and_end_time_live_on_the_time_and_loops_tab(window):
+    """QLab puts the file's start and end time here, not on Trim."""
     from cuerunner.model import Cue
 
     select(window, Cue(number="1", name="Song", kind="audio"))
-    window.insp_trim_in.setValue(2.0)
-    window.insp_trim_out.setValue(5.0)
+    window.insp_start_time.setValue(2.0)
+    window.insp_end_time.setValue(5.0)
     cue = window.show_model.cues[0]
     assert (cue.trim_in, cue.trim_out) == (2.0, 5.0)
     voice, clip = a_voice(frames=48000 * 10)
     window._apply_levels(voice, cue, clip)
     assert voice.position == 2 * 48000
+    assert voice.start == 2 * 48000
     assert voice.end == 5 * 48000
+
+
+def test_the_trim_tab_adjusts_the_volume(window):
+    """In QLab, Trim is an overall volume adjustment that Fade cues cannot change."""
+    from cuerunner.model import Cue
+
+    select(window, Cue(number="1", name="Song", kind="audio"))
+    window.insp_trim.setValue(-6.0)
+    cue = window.show_model.cues[0]
+    assert cue.trim_db == -6.0
+    voice, clip = a_voice()
+    window._apply_levels(voice, cue, clip)
+    assert voice.gain == pytest.approx(0.501, rel=0.01)  # trim applies on top of the level
+
+
+def test_play_count_and_infinite_loop_are_one_choice(window):
+    from cuerunner.model import Cue
+
+    select(window, Cue(number="1", name="Song", kind="audio"))
+    window.insp_play_count.setValue(3)
+    cue = window.show_model.cues[0]
+    assert cue.play_count == 3
+    voice, clip = a_voice()
+    window._apply_levels(voice, cue, clip)
+    assert voice.plays == 3
+
+    window.insp_infinite.setChecked(True)
+    window._inspector_apply()
+    assert window.show_model.cues[0].loop is True
 
 
 def test_a_trimmed_voice_stops_at_its_trim_out():
@@ -128,7 +159,7 @@ def test_inspector_fields_are_read_only_in_show_mode(window):
     select(window, Cue(number="1", name="Song", kind="audio"))
     window._set_mode(editing=False)
     assert not window.insp_volume.isEnabled()
-    assert not window.insp_trim_in.isEnabled()
+    assert not window.insp_start_time.isEnabled()
     assert not window.insp_route_button.isEnabled()
 
 

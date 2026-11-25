@@ -78,3 +78,26 @@ def test_decibels_convert_both_ways():
     assert db_to_gain(-60) == 0.0  # the bottom of the fader is silence
     assert gain_to_db(1.0) == pytest.approx(0.0)
     assert gain_to_db(0.0) == -60.0
+
+
+def test_a_cue_set_to_play_twice_goes_back_to_its_start_point():
+    """Play count on the Time & Loops tab: the file runs again from its start time."""
+    from cuerunner.engine import Clip, Voice, default_matrix
+
+    clip = Clip(np.ones((1000, 1), dtype=np.float32))
+    voice = Voice(clip=clip, matrix=default_matrix(1, 2), start=200, end=600, plays=2)
+    voice.position = 200
+    voice.read(500)  # runs past the end point
+    assert not voice.should_end()
+    assert voice.position == 200  # back to the start for the second play
+    voice.read(500)
+    assert voice.should_end()  # and done after that
+
+
+def test_an_infinite_loop_ignores_the_play_count():
+    from cuerunner.engine import Clip, Voice, default_matrix
+
+    clip = Clip(np.ones((500, 1), dtype=np.float32))
+    voice = Voice(clip=clip, matrix=default_matrix(1, 2), loop=True, plays=1)
+    voice.read(2000)
+    assert not voice.should_end()
