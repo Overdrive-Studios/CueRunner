@@ -274,7 +274,7 @@ class CueDialog(QDialog):
         self.route_button.clicked.connect(self._edit_routing)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._accept_checked)
         buttons.rejected.connect(self.reject)
 
         form = QFormLayout(self)
@@ -441,6 +441,17 @@ class CueDialog(QDialog):
         spin.setSuffix(" s")
         spin.setValue(value)
         return spin
+
+    def _accept_checked(self) -> None:
+        """OK, but only when the timecode trigger is blank or a valid HH:MM:SS:FF."""
+        text = self.trigger_tc_edit.text().strip() if hasattr(self, "trigger_tc_edit") else ""
+        if text:
+            try:
+                mtc.parse_timecode(text, 24)  # 24 is the strictest rate, so a value that passes here is valid at 25 and 30 too
+            except ValueError as exc:
+                QMessageBox.warning(self, "Timecode trigger", f"{exc}\n\nExample: 00:01:30:00")
+                return
+        self.accept()
 
     def apply_to(self, cue: Cue) -> None:
         cue.name = self.name_edit.text().strip() or cue.name

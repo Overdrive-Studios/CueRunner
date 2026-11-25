@@ -69,3 +69,20 @@ def test_incoming_timecode_fires_the_cue_it_passes(window):
         window._tc_queue.put((5_100, 25))  # 5.1 s: passes 00:00:05:00 at 25 fps
         window._poll_timecode()
         go_row.assert_called_once_with(1)
+
+
+def test_trigger_dialog_rejects_bad_timecode(window):
+    from cuerunner.model import Cue
+    from cuerunner.main import CueDialog
+
+    cue = Cue(number="1", name="t", kind="memo")
+    dialog = CueDialog(cue, window)
+    dialog.trigger_tc_edit.setText("00:01:90")
+    with mock.patch.object(QtWidgets.QMessageBox, "warning") as warning, mock.patch.object(dialog, "accept") as accept:
+        dialog._accept_checked()
+    warning.assert_called_once()
+    accept.assert_not_called()
+    dialog.trigger_tc_edit.setText("00:01:30:00")
+    with mock.patch.object(dialog, "accept") as accept:
+        dialog._accept_checked()
+    accept.assert_called_once()
