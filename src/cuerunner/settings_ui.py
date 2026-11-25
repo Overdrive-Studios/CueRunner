@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cuerunner import video_out
 from cuerunner.console_ui import FAMILIES
 from cuerunner.model import Show
 
@@ -84,6 +85,7 @@ def settings_from(show: Show) -> dict:
         "console_host": show.console_host,
         "console_family": show.console_family,
         "spotify_client_id": show.spotify_client_id,
+        "video_default_output": show.video_default_output,
     }
 
 
@@ -94,6 +96,7 @@ def apply_settings(show: Show, values: dict) -> None:
     show.console_host = str(values["console_host"]).strip()
     show.console_family = values["console_family"]
     show.spotify_client_id = str(values["spotify_client_id"]).strip()
+    show.video_default_output = str(values.get("video_default_output", show.video_default_output))
 
 
 def _rule() -> QFrame:
@@ -201,6 +204,23 @@ class SettingsDialog(QDialog):
             _row("Console type", self.console_family, "The Allen & Heath family this console belongs to."),
         ])
 
+        # Video
+        self.video_default = QComboBox()
+        self.video_default.setFixedWidth(220)
+        displays = video_out.display_names()
+        for i, label in enumerate(displays):
+            self.video_default.addItem(label, video_out.screen_output(i))
+        if not displays:
+            self.video_default.addItem("No displays found", "")
+        index = self.video_default.findData(current["video_default_output"])
+        self.video_default.setCurrentIndex(max(0, index))
+        video = _page("Video", [
+            _row("Default display", self.video_default,
+                 "New video cues start on this display. Each cue can still pick its own."),
+            _row("Connected displays", QLabel("\n".join(displays) if displays else "None found"),
+                 "Displays are numbered in the order your computer lists them."),
+        ])
+
         # Spotify
         self.spotify_client_id = QLineEdit(current["spotify_client_id"])
         self.spotify_client_id.setFixedWidth(320)
@@ -215,6 +235,7 @@ class SettingsDialog(QDialog):
         pages = [
             ("General", general),
             ("Audio", audio),
+            ("Video", video),
             ("Venue Radio", radio),
             ("Console", console),
             ("Spotify", spotify),
@@ -265,4 +286,5 @@ class SettingsDialog(QDialog):
             "console_host": self.console_host.text(),
             "console_family": self.console_family.currentData(),
             "spotify_client_id": self.spotify_client_id.text(),
+            "video_default_output": self.video_default.currentData() or "",
         }

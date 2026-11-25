@@ -36,6 +36,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QMenu,
+    QSizePolicy,
+    QToolButton,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -478,37 +481,51 @@ class MainWindow(QMainWindow):
     # --- UI setup -----------------------------------------------------
 
     def _build_toolbar(self) -> None:
+        """Top bar: file actions on the left, Pads and Settings on the right. Cue commands live in the Cues menu."""
         bar = QToolBar("File", self)
         bar.setMovable(False)
+        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.addToolBar(bar)
-        for label, handler in [
-            ("New", self.new_show),
-            ("Open...", self.open_show),
-            ("Save", self.save_show),
-        ]:
-            bar.addAction(label, handler)
+        bar.addAction("New", self.new_show)
+        bar.addAction("Open...", self.open_show)
+        bar.addAction("Save", self.save_show)
         bar.addSeparator()
-        for label, handler in [
-            ("Add Audio Cue...", self.add_audio_cue),
-            ("Add Video Cue...", self.add_video_cue),
-            ("Add Spotify Cue...", self.add_spotify_cue),
-            ("Add Console Cue...", self.add_console_cue),
-            ("Edit Cue...", self.edit_selected),
-            ("Remove Cue", self.remove_cue),
-        ]:
-            bar.addAction(label, handler)
-        bar.addSeparator()
-        bar.addAction("Settings...", self.open_settings)
+        add_button = QToolButton()
+        add_button.setText("Add Cue")
+        add_button.setToolTip("Add an audio, video, Spotify or console cue")
+        add_menu = QMenu(add_button)
+        add_menu.addAction("Audio Cue...", self.add_audio_cue)
+        add_menu.addAction("Video Cue...", self.add_video_cue)
+        add_menu.addAction("Spotify Cue...", self.add_spotify_cue)
+        add_menu.addAction("Console Cue...", self.add_console_cue)
+        add_button.setMenu(add_menu)
+        add_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        add_button.setStyleSheet("QToolButton { padding: 4px 10px; }")
+        bar.addWidget(add_button)
         bar.addSeparator()
         self.pads_action = bar.addAction("Pads")
         self.pads_action.setCheckable(True)
         self.pads_action.setChecked(True)
+        self.pads_action.setToolTip("Show or hide the soundboard pads")
         self.pads_action.toggled.connect(self._toggle_pads)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        bar.addWidget(spacer)
+        settings_action = bar.addAction("Settings...", self.open_settings)
+        settings_action.setToolTip("Audio, video, console and other settings")
 
     def _toggle_pads(self, shown: bool) -> None:
         self.soundboard.setVisible(shown)
 
     def _build_menus(self) -> None:
+        cues_menu = self.menuBar().addMenu("Cues")
+        cues_menu.addAction("Add Audio Cue...", self.add_audio_cue)
+        cues_menu.addAction("Add Video Cue...", self.add_video_cue)
+        cues_menu.addAction("Add Spotify Cue...", self.add_spotify_cue)
+        cues_menu.addAction("Add Console Cue...", self.add_console_cue)
+        cues_menu.addSeparator()
+        cues_menu.addAction("Edit Cue...", self.edit_selected)
+        cues_menu.addAction("Remove Cue", self.remove_cue)
         audio_menu = self.menuBar().addMenu("Audio")
         audio_menu.addAction("Output Device...", self.choose_output)
         audio_menu.addAction("Choose Mic Input...", self.choose_mic)
@@ -877,7 +894,7 @@ class MainWindow(QMainWindow):
         filenames, _ = QFileDialog.getOpenFileNames(self, "Add video cues", "", VIDEO_FILTER)
         if not filenames:
             return
-        default_output = video_out.screen_output(0) if QGuiApplication.screens() else ""
+        default_output = self.show_model.video_default_output if QGuiApplication.screens() else ""
         for filename in filenames:
             path = Path(filename)
             self.show_model.cues.append(Cue(

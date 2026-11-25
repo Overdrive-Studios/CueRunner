@@ -102,6 +102,7 @@ class Show:
     spotify_client_id: str = ""  # from the Spotify developer app; not a secret when using PKCE
     console_host: str = ""  # Allen & Heath console IP address
     console_family: str = "sq"  # "sq" or "dlive"
+    video_default_output: str = "screen:0"  # display used for new video cues, e.g. "screen:1"
 
     def next_number(self) -> str:
         numbers = []
@@ -142,6 +143,7 @@ class Show:
             "spotify_client_id": self.spotify_client_id,
             "console_host": self.console_host,
             "console_family": self.console_family,
+            "video_default_output": self.video_default_output,
         }
         return json.dumps(data, indent=2)
 
@@ -168,4 +170,5 @@ class Show:
             spotify_client_id=str(data.get("spotify_client_id", "")),
             console_host=str(data.get("console_host", "")),
             console_family=str(data.get("console_family", "sq")),
+            video_default_output=str(data.get("video_default_output", "screen:0")),
         )
