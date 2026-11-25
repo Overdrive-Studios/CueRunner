@@ -28,7 +28,7 @@ DEFAULT_REMOTE_PORT = 8080
 class Cue:
     number: str
     name: str
-    kind: str = "audio"  # audio, wait, memo (only audio is playable so far)
+    kind: str = "audio"  # audio, video, console, spotify, wait, memo
     file: str = ""
     fade_in: float = 0.0  # seconds
     fade_out: float = 0.0
@@ -37,6 +37,7 @@ class Cue:
     loop: bool = False
     then: str = "none"  # "none", "follow" (start next when this ends), or "continue" (start next now)
     route: list = field(default_factory=list)  # per clip channel, the 1-based outputs it goes to; empty = default
+    video_output: str = ""  # video cues: the display, e.g. "screen:1"; see video_out.py
 
 
 @dataclass

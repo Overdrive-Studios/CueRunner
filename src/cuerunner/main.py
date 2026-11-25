@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QBrush, QColor, QFont, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QBrush, QColor, QFont, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cuerunner import allenheath, console_ui, launcher, settings_ui, spotify, spotify_ui, updater
+from cuerunner import allenheath, console_ui, launcher, settings_ui, spotify, spotify_ui, updater, video_out
 from cuerunner.devices import DeviceInfo, label as devices_label
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
@@ -77,6 +77,7 @@ MAX_CHANNELS = 64
 
 SHOW_FILTER = "CueRunner show (*.cuerunner.json);;All files (*)"
 AUDIO_FILTER = "Audio files (*.wav *.aiff *.aif *.mp3 *.flac *.ogg);;All files (*)"
+VIDEO_FILTER = "Video files (*.mp4 *.mov *.m4v *.avi *.mkv);;All files (*)"
 THEN_LABELS = {"none": "", "follow": "Follow", "continue": "Continue"}
 
 PLAYING_COLOUR = QColor(30, 84, 48)
@@ -193,6 +194,12 @@ class CueDialog(QDialog):
         self.then_box.setCurrentIndex(max(0, self.then_box.findData(cue.then)))
         self.hotkey_edit = QKeySequenceEdit(QKeySequence(cue.hotkey))
         self._route: list[list[int]] = [list(group) for group in cue.route]
+        self._cue_kind = cue.kind
+        self.display_box = QComboBox()
+        for i, label in enumerate(video_out.display_names()):
+            self.display_box.addItem(label, video_out.screen_output(i))
+        current = max(0, self.display_box.findData(cue.video_output))
+        self.display_box.setCurrentIndex(current)
         self.route_label = QLabel(self._route_summary())
         self.route_button = QPushButton("Routing...")
         self.route_button.clicked.connect(self._edit_routing)
@@ -212,6 +219,8 @@ class CueDialog(QDialog):
         outputs_row.addWidget(self.route_label, 1)
         outputs_row.addWidget(self.route_button)
         form.addRow("Outputs", outputs_row)
+        if self._cue_kind == "video":
+            form.addRow("Display", self.display_box)
         form.addRow(buttons)
 
     def _route_summary(self) -> str:
@@ -245,6 +254,8 @@ class CueDialog(QDialog):
         cue.then = self.then_box.currentData()
         cue.hotkey = self.hotkey_edit.keySequence().toString()
         cue.route = [list(group) for group in self._route]
+        if cue.kind == "video" and self.display_box.count():
+            cue.video_output = self.display_box.currentData()
 
 
 class MidiMappingDialog(QDialog):
@@ -314,6 +325,7 @@ class MainWindow(QMainWindow):
         self._shortcuts: list[QShortcut] = []
         self._clips: dict[str, Clip] = {}
         self._cue_voices: list[Voice] = []
+        self._video = video_out.VideoOutputs(self)
         self._playing_cue: Cue | None = None
         self._row_bars: list[QProgressBar] = []
         self.mixer: Mixer | None = None
@@ -359,6 +371,10 @@ class MainWindow(QMainWindow):
         self._open_default_output()
         self._refresh_title()
         self._fit_to_screen()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        self._video.close()
+        super().closeEvent(event)
 
     def _fit_to_screen(self) -> None:
         """Size the window to the screen it opens on so no controls run off the edge."""
@@ -474,6 +490,7 @@ class MainWindow(QMainWindow):
         bar.addSeparator()
         for label, handler in [
             ("Add Audio Cue...", self.add_audio_cue),
+            ("Add Video Cue...", self.add_video_cue),
             ("Add Spotify Cue...", self.add_spotify_cue),
             ("Add Console Cue...", self.add_console_cue),
             ("Edit Cue...", self.edit_selected),
@@ -856,6 +873,19 @@ class MainWindow(QMainWindow):
                 self._probe_duration(cue)
             self._refresh_table()
 
+    def add_video_cue(self) -> None:
+        filenames, _ = QFileDialog.getOpenFileNames(self, "Add video cues", "", VIDEO_FILTER)
+        if not filenames:
+            return
+        default_output = video_out.screen_output(0) if QGuiApplication.screens() else ""
+        for filename in filenames:
+            path = Path(filename)
+            self.show_model.cues.append(Cue(
+                number=self.show_model.next_number(), name=path.stem, kind="video",
+                file=str(path), video_output=default_output,
+            ))
+        self._refresh_table()
+
     def _probe_duration(self, cue: Cue) -> None:
         if cue.kind != "audio" or not cue.file:
             return
@@ -912,6 +942,16 @@ class MainWindow(QMainWindow):
             self._send_console_cue(cue)
             self.table.selectRow(min(row + 1, len(cues) - 1))
             return
+        if cue.kind == "video":
+            if not cue.file:
+                QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\nThis video cue has no file.")
+            else:
+                try:
+                    self._video.play(cue.video_output, cue.file)
+                except Exception as exc:
+                    QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
+            self.table.selectRow(min(row + 1, len(cues) - 1))
+            return
         if self.mixer is None:
             return
         if cue.kind == "audio" and cue.file:
@@ -943,6 +983,7 @@ class MainWindow(QMainWindow):
 
     def stop(self) -> None:
         self._pause_spotify()
+        self._video.stop_all()
         if self.mixer is None:
             return
         for voice in self._cue_voices:
@@ -958,6 +999,7 @@ class MainWindow(QMainWindow):
     def panic(self) -> None:
         """Stop everything immediately, with no fade, including pads."""
         self._pause_spotify()
+        self._video.stop_all()
         if self.mixer is not None:
             self.mixer.clear()
             self.mixer.paused = False
