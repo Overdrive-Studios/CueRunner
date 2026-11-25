@@ -57,6 +57,20 @@ class Cue:
     trigger_tc: str = ""  # HH:MM:SS:FF; fires when incoming timecode passes it (empty for none)
     fps: int = 30  # timecode cues: MIDI Timecode frame rate (24, 25 or 30)
     volume: float = 1.0  # Levels tab: the cue's own level, 0 to about 4 (0 dB = 1.0)
+    midi_trigger_on: bool = False  # Triggers: fire this cue from an incoming MIDI message
+    midi_trigger_kind: str = "note_on"  # "note_on", "note_off" or "control_change"
+    midi_trigger_number: int = 0  # the note or controller number
+    midi_trigger_channel: int = 0  # 1 to 16; 0 means any channel
+    wall_clock: str = ""  # Triggers: HH:MM:SS local time to fire at each day (empty for none)
+    fade_stop_others: bool = False  # Triggers: fade and stop other cues when this one starts
+    fade_stop_time: float = 1.0  # seconds
+    duck_others: bool = False  # Triggers: duck other cues while this one runs
+    duck_by_db: float = 0.0
+    duck_time: float = 1.0
+    second_trigger: str = "nothing"  # "nothing", "restart", "stop" or "pause" if already running
+    flagged: bool = False  # Basics: marks a cue to come back to; shown on its row
+    auto_load: bool = False  # Basics: load the cue as soon as the playhead reaches it
+    skip_if_disarmed: bool = False  # Basics: GO carries on to the next cue instead of stopping here
     trim_db: float = 0.0  # Trim tab: an overall volume trim in dB, which Fade cues cannot change
     play_count: int = 1  # Time & Loops: how many times through (ignored when loop is on)
     trim_in: float = 0.0  # Time & Loops "Start time", seconds: where the file starts playing

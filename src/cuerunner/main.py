@@ -13,7 +13,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QThread, Qt, QTimer, Signal
+from PySide6.QtCore import QDate, QEvent, QThread, Qt, QTime, QTimer, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QFont, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFrame,
@@ -83,6 +83,9 @@ BACKUP_INTERVAL_MS = 15 * 60 * 1000  # automatic show snapshot every 15 minutes
 DMX_STEP_MS = 40  # light ramps send a new frame this often
 INSPECTOR_MAX_HEIGHT = 230  # the inspector scrolls past this, so the cue list keeps its room
 INSPECTOR_TABS = ["Basics", "Triggers", "I/O", "Time & Loops", "Levels", "Objects", "Trim", "Audio FX"]
+MIDI_TRIGGER_KINDS = [("Note On", "note_on"), ("Note Off", "note_off"), ("Control Change", "control_change")]
+SECOND_TRIGGER_ACTIONS = [("does nothing", "nothing"), ("starts it again", "restart"),
+                          ("stops it", "stop"), ("pauses it", "pause")]
 CONTINUE_MODES = [("Do not continue", "none"), ("Auto-follow", "follow"), ("Auto-continue", "continue")]
 
 
@@ -708,6 +711,9 @@ class MainWindow(QMainWindow):
         self._remote_state: RemoteState | None = None
         self._midi: MidiInput | None = None
         self._midi_commands: queue.Queue[str] = queue.Queue()
+        self._midi_triggers: queue.Queue[tuple[str, int, int]] = queue.Queue()
+        self._wall_clock_fired: dict[str, str] = {}  # cue number -> the day it last fired
+        self._ducking: Cue | None = None  # the cue currently ducking the others
         self._tc_listen: mtc.TimecodeInput | None = None  # incoming MIDI Timecode
         self._tc_queue: queue.Queue[tuple[int, int]] = queue.Queue()  # (ms, fps) from the MIDI thread
         self._tc_triggers = mtc.TimecodeTriggers()
@@ -894,10 +900,25 @@ class MainWindow(QMainWindow):
             self.insp_hotkey.setKeySequence(QKeySequence(cue.hotkey))
             self.insp_notes.setPlainText(cue.notes)
             self.insp_armed.setChecked(cue.armed)
+            self.insp_flagged.setChecked(cue.flagged)
+            self.insp_auto_load.setChecked(cue.auto_load)
+            self.insp_skip.setChecked(cue.skip_if_disarmed)
             self.insp_loop.setChecked(cue.loop)
             self.insp_loop_in.setValue(cue.loop_in)
             self.insp_loop_out.setValue(cue.loop_out)
             self.insp_trigger_tc.setText(cue.trigger_tc)
+            self.insp_wall_clock.setText(cue.wall_clock)
+            self.insp_midi_on.setChecked(cue.midi_trigger_on)
+            self.insp_midi_kind.setCurrentIndex(max(0, self.insp_midi_kind.findData(cue.midi_trigger_kind)))
+            self.insp_midi_number.setValue(cue.midi_trigger_number)
+            self.insp_midi_channel.setCurrentIndex(max(0, self.insp_midi_channel.findData(cue.midi_trigger_channel)))
+            self.insp_fade_stop.setChecked(cue.fade_stop_others)
+            self.insp_fade_stop_time.setValue(cue.fade_stop_time)
+            self.insp_duck_others.setChecked(cue.duck_others)
+            self.insp_duck_by.setValue(cue.duck_by_db)
+            self.insp_duck_time.setValue(cue.duck_time)
+            self.insp_second_trigger.setCurrentIndex(
+                max(0, self.insp_second_trigger.findData(cue.second_trigger)))
             self.insp_route_label.setText(_route_summary(cue.route))
             self.insp_volume.setValue(fx.gain_to_db(cue.volume))
             self.insp_fade_in.setValue(cue.fade_in)
@@ -1008,8 +1029,22 @@ class MainWindow(QMainWindow):
         cue.then = self.insp_continue.currentData() or "none"
         cue.colour = self.insp_colour.currentData() or ""
         cue.hotkey = self.insp_hotkey.keySequence().toString()
+        cue.wall_clock = self.insp_wall_clock.text().strip()
+        cue.midi_trigger_on = self.insp_midi_on.isChecked()
+        cue.midi_trigger_kind = self.insp_midi_kind.currentData() or "note_on"
+        cue.midi_trigger_number = self.insp_midi_number.value()
+        cue.midi_trigger_channel = self.insp_midi_channel.currentData() or 0
+        cue.fade_stop_others = self.insp_fade_stop.isChecked()
+        cue.fade_stop_time = self.insp_fade_stop_time.value()
+        cue.duck_others = self.insp_duck_others.isChecked()
+        cue.duck_by_db = self.insp_duck_by.value()
+        cue.duck_time = self.insp_duck_time.value()
+        cue.second_trigger = self.insp_second_trigger.currentData() or "nothing"
         cue.notes = self.insp_notes.toPlainText()
         cue.armed = self.insp_armed.isChecked()
+        cue.flagged = self.insp_flagged.isChecked()
+        cue.auto_load = self.insp_auto_load.isChecked()
+        cue.skip_if_disarmed = self.insp_skip.isChecked()
         cue.volume = fx.db_to_gain(self.insp_volume.value())
         cue.fade_in = self.insp_fade_in.value()
         cue.fade_out = self.insp_fade_out.value()
@@ -1300,9 +1335,10 @@ class MainWindow(QMainWindow):
         self.insp_colour = QComboBox()
         for label, value in COLOURS:
             self.insp_colour.addItem(label, value)
-        self.insp_hotkey = QKeySequenceEdit()
-        self.insp_hotkey.setMaximumWidth(160)
         self.insp_armed = QCheckBox("Armed")
+        self.insp_flagged = QCheckBox("Flagged")
+        self.insp_auto_load = QCheckBox("Auto-load")
+        self.insp_skip = QCheckBox("Skip if disarmed")
         self.insp_full_edit = QPushButton("Full Edit…")
 
         left = [("Number:", self.insp_number), ("Duration:", self.insp_duration),
@@ -1312,13 +1348,17 @@ class MainWindow(QMainWindow):
             grid.addWidget(QLabel(caption), row, 0)
             grid.addWidget(widget, row, 1)
         right = [("Name:", self.insp_name), ("Target:", self.insp_target),
-                 ("Colour:", self.insp_colour), ("Hotkey:", self.insp_hotkey)]
+                 ("Colour:", self.insp_colour)]
         for row, (caption, widget) in enumerate(right):
             grid.addWidget(QLabel(caption), row, 2)
             grid.addWidget(widget, row, 3)
         grid.addWidget(QLabel("Notes:"), len(right), 2, Qt.AlignmentFlag.AlignTop)
         grid.addWidget(self.insp_notes, len(right), 3)
-        grid.addWidget(self.insp_armed, len(left), 0, 1, 2)
+        flags = QHBoxLayout()
+        for box in (self.insp_armed, self.insp_flagged, self.insp_auto_load, self.insp_skip):
+            flags.addWidget(box)
+        flags.addStretch(1)
+        grid.addLayout(flags, len(left), 0, 1, 3)
         grid.addWidget(self.insp_full_edit, len(left), 3, Qt.AlignmentFlag.AlignRight)
         grid.setColumnStretch(3, 1)
         # One page per tab, in tab order, so the stack index matches the tab index.
@@ -1330,13 +1370,76 @@ class MainWindow(QMainWindow):
         triggers_page.setObjectName("inspectorPage")
         tgrid = QGridLayout(triggers_page)
         tgrid.setContentsMargins(12, 10, 12, 10)
+        self.insp_hotkey = QKeySequenceEdit()
+        self.insp_hotkey.setMaximumWidth(190)
+        self.insp_midi_on = QCheckBox()
+        self.insp_midi_kind = QComboBox()
+        for label, value in MIDI_TRIGGER_KINDS:
+            self.insp_midi_kind.addItem(label, value)
+        self.insp_midi_number = QSpinBox()
+        self.insp_midi_number.setRange(0, 127)
+        self.insp_midi_number.setMaximumWidth(70)
+        self.insp_midi_channel = QComboBox()
+        self.insp_midi_channel.addItem("Any channel", 0)
+        for channel in range(1, 17):
+            self.insp_midi_channel.addItem(f"Channel {channel}", channel)
+        self.insp_wall_clock = QLineEdit()
+        self.insp_wall_clock.setPlaceholderText("HH:MM:SS, blank for none")
+        self.insp_wall_clock.setMaximumWidth(190)
         self.insp_trigger_tc = QLineEdit()
         self.insp_trigger_tc.setPlaceholderText("HH:MM:SS:FF, blank for none")
-        self.insp_trigger_tc.setMaximumWidth(200)
-        tgrid.addWidget(QLabel("Timecode:"), 0, 0)
-        tgrid.addWidget(self.insp_trigger_tc, 0, 1)
-        tgrid.addWidget(QLabel("Fires when incoming timecode reaches this time."), 1, 1)
-        tgrid.setRowStretch(2, 1)
+        self.insp_trigger_tc.setMaximumWidth(190)
+
+        tgrid.addWidget(QLabel("Hotkey Trigger:"), 0, 0)
+        tgrid.addWidget(self.insp_hotkey, 0, 1, 1, 3)
+        tgrid.addWidget(QLabel("MIDI Trigger:"), 1, 0)
+        tgrid.addWidget(self.insp_midi_on, 1, 1)
+        tgrid.addWidget(self.insp_midi_kind, 1, 2)
+        tgrid.addWidget(self.insp_midi_number, 1, 3)
+        tgrid.addWidget(self.insp_midi_channel, 2, 2, 1, 2)
+        tgrid.addWidget(QLabel("Wall Clock Trigger:"), 3, 0)
+        tgrid.addWidget(self.insp_wall_clock, 3, 1, 1, 3)
+        tgrid.addWidget(QLabel("Timecode Trigger:"), 4, 0)
+        tgrid.addWidget(self.insp_trigger_tc, 4, 1, 1, 3)
+
+        # Right hand column: what happens to everything else when this cue starts.
+        self.insp_fade_stop = QCheckBox("Fade && stop other cues over")
+        self.insp_fade_stop_time = QDoubleSpinBox()
+        self.insp_duck_others = QCheckBox("Duck other cues in this list while running")
+        self.insp_duck_by = QDoubleSpinBox()
+        self.insp_duck_by.setRange(-60.0, 0.0)
+        self.insp_duck_by.setSuffix(" dB")
+        self.insp_duck_time = QDoubleSpinBox()
+        for spin in (self.insp_fade_stop_time, self.insp_duck_time):
+            spin.setRange(0.0, 600.0)
+            spin.setDecimals(1)
+            spin.setSuffix(" s")
+        for spin in (self.insp_fade_stop_time, self.insp_duck_time, self.insp_duck_by):
+            spin.setMaximumWidth(110)
+        self.insp_second_trigger = QComboBox()
+        for label, value in SECOND_TRIGGER_ACTIONS:
+            self.insp_second_trigger.addItem(label, value)
+        right_box = QGridLayout()
+        right_box.addWidget(QLabel("When starting this cue:"), 0, 0, 1, 2)
+        right_box.addWidget(self.insp_fade_stop, 1, 0)
+        right_box.addWidget(self.insp_fade_stop_time, 1, 1)
+        right_box.addWidget(self.insp_duck_others, 2, 0, 1, 2)
+        duck_row = QHBoxLayout()
+        duck_row.addWidget(QLabel("Duck by:"))
+        duck_row.addWidget(self.insp_duck_by)
+        duck_row.addWidget(QLabel("over:"))
+        duck_row.addWidget(self.insp_duck_time)
+        duck_row.addStretch(1)
+        right_box.addLayout(duck_row, 3, 0, 1, 2)
+        second_row = QHBoxLayout()
+        second_row.addWidget(QLabel("If running, a second trigger:"))
+        second_row.addWidget(self.insp_second_trigger)
+        second_row.addStretch(1)
+        right_box.addLayout(second_row, 4, 0, 1, 2)
+        right_box.setRowStretch(5, 1)
+        tgrid.addLayout(right_box, 0, 5, 6, 1)
+        tgrid.setColumnStretch(5, 1)
+        tgrid.setRowStretch(6, 1)
         built_pages["Triggers"] = triggers_page
 
         # Time & Loops: looping and the loop points.
@@ -1511,7 +1614,11 @@ class MainWindow(QMainWindow):
         # Every field that edits the selected cue, enabled together in Edit mode.
         self._insp_editable = [
             self.insp_name, self.insp_pre, self.insp_post, self.insp_continue, self.insp_colour,
-            self.insp_hotkey, self.insp_notes, self.insp_armed, self.insp_loop, self.insp_loop_in,
+            self.insp_hotkey, self.insp_notes, self.insp_armed, self.insp_flagged,
+            self.insp_auto_load, self.insp_skip, self.insp_loop, self.insp_loop_in,
+            self.insp_midi_on, self.insp_midi_kind, self.insp_midi_number, self.insp_midi_channel,
+            self.insp_wall_clock, self.insp_fade_stop, self.insp_fade_stop_time,
+            self.insp_duck_others, self.insp_duck_by, self.insp_duck_time, self.insp_second_trigger,
             self.insp_loop_out, self.insp_trigger_tc, self.insp_route_button, self.insp_volume,
             self.insp_wave,
             self.insp_fade_in, self.insp_fade_out, self.insp_start_time, self.insp_end_time,
@@ -1527,6 +1634,14 @@ class MainWindow(QMainWindow):
         self.insp_play_once.toggled.connect(self._inspector_apply)
         self.insp_opacity.valueChanged.connect(self._inspector_apply)
         self.insp_display.currentIndexChanged.connect(self._inspector_apply)
+        self.insp_wall_clock.editingFinished.connect(self._inspector_apply)
+        for box in (self.insp_midi_on, self.insp_fade_stop, self.insp_duck_others):
+            box.toggled.connect(self._inspector_apply)
+        for combo in (self.insp_midi_kind, self.insp_midi_channel, self.insp_second_trigger):
+            combo.currentIndexChanged.connect(self._inspector_apply)
+        for spin in (self.insp_midi_number, self.insp_fade_stop_time, self.insp_duck_by,
+                     self.insp_duck_time):
+            spin.valueChanged.connect(self._inspector_apply)
         self.insp_trigger_tc.editingFinished.connect(self._inspector_apply)
         self.insp_loop.toggled.connect(self._inspector_apply)
         self.insp_loop_in.valueChanged.connect(self._inspector_apply)
@@ -1538,7 +1653,8 @@ class MainWindow(QMainWindow):
         self.insp_colour.currentIndexChanged.connect(self._inspector_apply)
         self.insp_hotkey.keySequenceChanged.connect(self._inspector_apply)
         self.insp_notes.textChanged.connect(self._inspector_apply)
-        self.insp_armed.toggled.connect(self._inspector_apply)
+        for box in (self.insp_armed, self.insp_flagged, self.insp_auto_load, self.insp_skip):
+            box.toggled.connect(self._inspector_apply)
         self.insp_full_edit.clicked.connect(self.edit_selected)
         layout.addWidget(self.inspector_bar)
 
@@ -1613,13 +1729,16 @@ class MainWindow(QMainWindow):
             self.cue_count_label.setText(f"{len(cues)} cue{'' if len(cues) == 1 else 's'} in 1 list")
         playhead = self._playhead_row()
         playing_row = self._row_of(self._playing_cue)
+        if 0 <= playhead < len(cues) and cues[playhead].auto_load:
+            self._preload(cues[playhead])  # ready to start the moment it is run
 
         self.table.setRowCount(len(cues))
         self._row_bars = []
         for row, cue in enumerate(cues):
             marker = PLAYHEAD_MARK if row == playhead else ""
+            flag = " \u2691" if cue.flagged else ""  # a flagged cue carries a mark on its row
             values = [
-                f"{marker} {cue.number}".strip(),
+                f"{marker} {cue.number}{flag}".strip(),
                 ("    " if cue.parent else "") + cue.name,
                 f"{cue.pre_wait_ms / 1000:g} s" if cue.pre_wait_ms else "",
                 format_duration(cue.duration_ms),
@@ -2303,12 +2422,18 @@ class MainWindow(QMainWindow):
         replace=True fades out whatever cue is already playing. replace=False lets it run on.
         """
         if not self.show_model.cues[row].armed:
-            self._advance(row)  # disarmed cues are skipped, as QLab does on GO
+            # A disarmed cue never fires. "Skip if disarmed" sends GO on to the next cue;
+            # without it the GO is used up here and the playhead simply moves on.
+            self._advance(row)
+            if self.show_model.cues[row].skip_if_disarmed and row + 1 < len(self.show_model.cues):
+                self.go_row(row + 1, replace=replace)
             return
         cues = self.show_model.cues
         if not 0 <= row < len(cues):
             return
         cue = cues[row]
+        if not _pre_done and self._second_trigger(cue):
+            return
         if cue.pre_wait_ms > 0 and not _pre_done:
             self._after(cue.pre_wait_ms, lambda: self.go_row(row, replace=replace, _pre_done=True))
             return
@@ -2470,6 +2595,7 @@ class MainWindow(QMainWindow):
                 tag=cue,
             )
             self._apply_levels(voice, cue, clip)
+            self._start_options(cue)
             if cue.fade_in > 0:
                 voice.env = 0.0
                 voice.fade(1.0, cue.fade_in, self.mixer.rate)
@@ -2577,6 +2703,10 @@ class MainWindow(QMainWindow):
         self._remote_tick()
         while not self._midi_commands.empty():
             self._run_command(self._midi_commands.get_nowait())
+        while not self._midi_triggers.empty():
+            self._fire_midi_trigger(self._midi_triggers.get_nowait())
+        self._check_wall_clock()
+        self._check_ducking()
         self._poll_timecode()
         if self._mic_chain is not None and self.mixer is not None:
             self.mixer.set_ducked(self._mic_chain.gate_open, self.show_model.duck_level)
@@ -2673,7 +2803,8 @@ class MainWindow(QMainWindow):
         if not ok:
             return
         try:
-            self._midi = MidiInput(name, self._midi_commands.put, mapping=self.show_model.midi_map)
+            self._midi = MidiInput(name, self._midi_commands.put, mapping=self.show_model.midi_map,
+                                   on_trigger=self._midi_triggers.put)
         except Exception as exc:
             QMessageBox.critical(self, "MIDI", f"Could not open that MIDI port:\n{exc}")
 
@@ -2715,6 +2846,80 @@ class MainWindow(QMainWindow):
                 row = next((i for i, c in enumerate(self.show_model.cues) if c.number == number), None)
                 if row is not None:
                     self.go_row(row)
+
+    def _fire_midi_trigger(self, trigger: tuple[str, int, int]) -> None:
+        """An incoming MIDI message: run any cue set to listen for it."""
+        kind, number, channel = trigger
+        for row, cue in enumerate(self.show_model.cues):
+            if not cue.midi_trigger_on or cue.midi_trigger_kind != kind:
+                continue
+            if cue.midi_trigger_number != number:
+                continue
+            if cue.midi_trigger_channel and cue.midi_trigger_channel != channel:
+                continue  # 0 means any channel
+            self.go_row(row)
+
+    def _check_wall_clock(self) -> None:
+        """Cues with a wall clock trigger fire once a day as the clock passes their time."""
+        now = QTime.currentTime()
+        today = str(QDate.currentDate().toString(Qt.DateFormat.ISODate))
+        for row, cue in enumerate(self.show_model.cues):
+            if not cue.wall_clock:
+                continue
+            due = QTime.fromString(cue.wall_clock, "HH:mm:ss")
+            if not due.isValid() or now < due:
+                continue
+            if self._wall_clock_fired.get(cue.number) == today:
+                continue
+            self._wall_clock_fired[cue.number] = today
+            self.go_row(row)
+
+    def _start_options(self, cue: Cue) -> None:
+        """Fade & stop, and ducking, applied to the other cues when this one starts."""
+        if self.mixer is None:
+            return
+        if cue.fade_stop_others:
+            for voice in self._cue_voices:
+                if voice.tag is not cue and not voice.done and not voice.preloaded:
+                    self.mixer.fade_out(voice, cue.fade_stop_time)
+        if cue.duck_others:
+            level = fx.db_to_gain(cue.duck_by_db)
+            for voice in self._cue_voices:
+                if voice.tag is not cue and not voice.done and not voice.preloaded:
+                    voice.fade(level, cue.duck_time, self.mixer.rate)
+            self._ducking = cue
+
+    def _check_ducking(self) -> None:
+        """Bring the other cues back up once the cue that ducked them has finished."""
+        if self._ducking is None or self.mixer is None:
+            return
+        still_running = any(v.tag is self._ducking and not v.done for v in self._cue_voices)
+        if still_running:
+            return
+        cue, self._ducking = self._ducking, None
+        for voice in self._cue_voices:
+            if voice.tag is not cue and not voice.done and not voice.stop_when_done:
+                voice.fade(1.0, cue.duck_time, self.mixer.rate)
+
+    def _second_trigger(self, cue: Cue) -> bool:
+        """A cue triggered while it is already running. True means the GO was dealt with here."""
+        if not self._cue_is_running(cue):
+            return False
+        if cue.second_trigger == "nothing":
+            return True  # the cue carries on undisturbed and the GO is used up
+        if cue.second_trigger == "stop":
+            self._reset_cue(cue)
+            return True
+        if cue.second_trigger == "pause":
+            for voice in self._cue_voices:
+                if voice.tag is cue and not voice.done:
+                    voice.paused = not voice.paused
+            return True
+        self._reset_cue(cue)  # "restart": stop it, then let the GO start it again
+        return False
+
+    def _cue_is_running(self, cue: Cue) -> bool:
+        return any(v.tag is cue and not v.done and not v.preloaded for v in self._cue_voices)
 
     def _timecode_trigger_items(self, fps: int) -> list[tuple[int, str]]:
         items = []
