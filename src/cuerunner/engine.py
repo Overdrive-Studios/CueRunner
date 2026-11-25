@@ -118,7 +118,10 @@ class Voice:
     loop: bool = False
     loop_start: int = 0  # frames; the loop wraps between loop_start and loop_end (0 end = clip end)
     loop_end: int = 0
-    end: int = 0  # frames; playback stops here (0 = the end of the clip). Set by a cue's trim out.
+    start: int = 0  # frames; where playback begins, and where a repeat goes back to
+    end: int = 0  # frames; playback stops here (0 = the end of the clip). Set by a cue's end time.
+    plays: int = 1  # how many times through; loop=True overrides this and plays forever
+    _plays_done: int = 0
     fx: Any = None  # an fx.EqChain applied to this voice, or None for no processing
     bed: bool = False  # bed voices are lowered while ducking is active
     gain: float = 1.0
@@ -194,7 +197,15 @@ class Voice:
     def should_end(self) -> bool:
         if self.stop_when_done and self._fade_complete:
             return True
-        return not self.loop and self.position >= self._end_frame()
+        if self.loop or self.position < self._end_frame():
+            return False
+        if self._plays_done + 1 < max(self.plays, 1):
+            # Another time through: go back to the start point rather than finishing.
+            self._plays_done += 1
+            self.position = self.start
+            self.natural_end = False
+            return False
+        return True
 
 
 class Mixer:

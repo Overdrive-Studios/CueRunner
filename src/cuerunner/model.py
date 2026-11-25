@@ -57,8 +57,10 @@ class Cue:
     trigger_tc: str = ""  # HH:MM:SS:FF; fires when incoming timecode passes it (empty for none)
     fps: int = 30  # timecode cues: MIDI Timecode frame rate (24, 25 or 30)
     volume: float = 1.0  # Levels tab: the cue's own level, 0 to about 4 (0 dB = 1.0)
-    trim_in: float = 0.0  # Trim tab, seconds: skip this much of the start of the file
-    trim_out: float = 0.0  # Trim tab, seconds: stop here (0 means play to the end)
+    trim_db: float = 0.0  # Trim tab: an overall volume trim in dB, which Fade cues cannot change
+    play_count: int = 1  # Time & Loops: how many times through (ignored when loop is on)
+    trim_in: float = 0.0  # Time & Loops "Start time", seconds: where the file starts playing
+    trim_out: float = 0.0  # Time & Loops "End time", seconds: where it stops (0 = the end)
     eq_low: float = 0.0  # Audio FX tab: low shelf gain in dB
     eq_mid: float = 0.0  # Audio FX tab: mid peak gain in dB
     eq_high: float = 0.0  # Audio FX tab: high shelf gain in dB

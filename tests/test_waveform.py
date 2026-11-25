@@ -113,3 +113,10 @@ def test_a_disabled_view_ignores_clicks(app, wav):
     view.setEnabled(False)
     click(view, 200)
     assert view.markers() == (0.0, 0.0)
+
+
+def test_the_time_scale_uses_round_numbers(app, wav):
+    view = ready_view(wav, width=600)
+    assert view.tick_seconds() in (1.0, 2.0, 5.0)  # a round step for a four second file
+    assert waveform.WaveformView.label_for(0) == "0:00"
+    assert waveform.WaveformView.label_for(95) == "1:35"
