@@ -20,7 +20,7 @@ jobs:
       - run: python -m pytest -q
       - name: Build Windows exe
         run: >
-          pyinstaller --noconfirm --onefile --windowed --name CueRunner
+          pyinstaller --noconfirm --onefile --windowed --name CueRunner --icon assets/icon.ico
           --paths src run_cuerunner.py
       - uses: actions/upload-artifact@v4
         with:
@@ -38,7 +38,7 @@ jobs:
       - run: python -m pytest -q
       - name: Build macOS app
         run: >
-          pyinstaller --noconfirm --windowed --name CueRunner
+          pyinstaller --noconfirm --windowed --name CueRunner --icon assets/icon.icns
           --paths src run_cuerunner.py
       - name: Package .dmg
         run: |
