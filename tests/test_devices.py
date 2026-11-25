@@ -1,5 +1,3 @@
-import os
-
 from cuerunner.devices import DeviceInfo, enable_asio, is_asio, label, ordered
 
 

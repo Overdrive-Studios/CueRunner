@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, MutableMapping
+from typing import MutableMapping
 
 
 @dataclass
