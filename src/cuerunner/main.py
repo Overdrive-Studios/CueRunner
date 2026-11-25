@@ -1387,36 +1387,43 @@ class MainWindow(QMainWindow):
     # --- Help and updates ---------------------------------------------
 
     def about(self) -> None:
-        QMessageBox.information(self, "About CueRunner", f"CueRunner {__version__}")
+        self.about_from(self)
+
+    def about_from(self, owner: QWidget) -> None:
+        """Show About with `owner` as its parent. Dialogs need a visible parent, so the launch screen passes itself."""
+        QMessageBox.information(owner, "About CueRunner", f"CueRunner {__version__}")
 
     def check_for_updates(self) -> None:
+        self.check_for_updates_from(self)
+
+    def check_for_updates_from(self, owner: QWidget) -> None:
         if not getattr(sys, "frozen", False):
-            QMessageBox.information(self, "Updates", "Updates are only available in the packaged app.")
+            QMessageBox.information(owner, "Updates", "Updates are only available in the packaged app.")
             return
         try:
             release = updater.fetch_latest_release()
         except Exception as exc:  # network, JSON, or GitHub errors
-            QMessageBox.warning(self, "Update check failed", f"Could not check for updates:\n{exc}")
+            QMessageBox.warning(owner, "Update check failed", f"Could not check for updates:\n{exc}")
             return
         if release is None:
-            QMessageBox.information(self, "Updates", "No build for this platform is published yet.")
+            QMessageBox.information(owner, "Updates", "No build for this platform is published yet.")
             return
         if not updater.is_newer(release.tag):
-            QMessageBox.information(self, "Updates", f"You have the latest version ({__version__}).")
+            QMessageBox.information(owner, "Updates", f"You have the latest version ({__version__}).")
             return
         answer = QMessageBox.question(
-            self,
+            owner,
             "Update available",
             f"CueRunner {release.tag} is available (you have {__version__}).\n\n"
             "Download it now? CueRunner will restart to apply the update.",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self._download_update(release)
+        self._download_update(release, owner)
 
-    def _download_update(self, release: updater.Release) -> None:
+    def _download_update(self, release: updater.Release, owner: QWidget) -> None:
         dest = Path(tempfile.mkdtemp(prefix="cuerunner-dl-")) / release.asset_name
-        dialog = QProgressDialog(f"Downloading CueRunner {release.tag}...", "Cancel", 0, 100, self)
+        dialog = QProgressDialog(f"Downloading CueRunner {release.tag}...", "Cancel", 0, 100, owner)
         dialog.setWindowTitle("Update CueRunner")
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.setMinimumDuration(0)
@@ -1441,20 +1448,24 @@ class MainWindow(QMainWindow):
                     dialog.setRange(0, 100)
                 dialog.setValue(value)
 
-        worker = _DownloadWorker(release.asset_url, dest, self)
+        worker = _DownloadWorker(release.asset_url, dest, owner)
         worker.progress.connect(show_progress)
-        worker.failed.connect(lambda msg: (dialog.close(), QMessageBox.critical(self, "Update failed", msg)))
+        worker.failed.connect(lambda msg: (dialog.close(), QMessageBox.critical(owner, "Update failed", msg)))
 
         def finished(path: str) -> None:
             dialog.close()
             try:
                 updater.apply_update(Path(path))
             except Exception as exc:
-                QMessageBox.critical(self, "Update failed", str(exc))
+                QMessageBox.critical(owner, "Update failed", str(exc))
                 return
             QMessageBox.information(
-                self, "Update ready", "CueRunner will close and reopen to finish the update."
+                owner, "Update ready", "CueRunner will close and reopen to finish the update."
             )
+            # The launch screen runs its own loop, so quit() alone would leave the app open
+            # and the swap would never start. Close it first so the process exits.
+            if isinstance(owner, QDialog):
+                owner.reject()
             QApplication.quit()
 
         worker.done.connect(finished)
@@ -1467,7 +1478,10 @@ def run() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     apply_dark_theme(app)
     window = MainWindow()
-    start = launcher.LaunchDialog(window.check_for_updates, window.about)
+    start = launcher.LaunchDialog(
+        lambda: window.check_for_updates_from(start),
+        lambda: window.about_from(start),
+    )
     if start.exec() != QDialog.DialogCode.Accepted:
         window.close()
         return 0
