@@ -56,6 +56,12 @@ class Cue:
     new_target: str = ""  # target cues: what the cue named in target now points at
     trigger_tc: str = ""  # HH:MM:SS:FF; fires when incoming timecode passes it (empty for none)
     fps: int = 30  # timecode cues: MIDI Timecode frame rate (24, 25 or 30)
+    volume: float = 1.0  # Levels tab: the cue's own level, 0 to about 4 (0 dB = 1.0)
+    trim_in: float = 0.0  # Trim tab, seconds: skip this much of the start of the file
+    trim_out: float = 0.0  # Trim tab, seconds: stop here (0 means play to the end)
+    eq_low: float = 0.0  # Audio FX tab: low shelf gain in dB
+    eq_mid: float = 0.0  # Audio FX tab: mid peak gain in dB
+    eq_high: float = 0.0  # Audio FX tab: high shelf gain in dB
     notes: str = ""  # free text shown in the inspector's Notes box
     colour: str = ""  # a hex colour shown on the cue's row, e.g. "#2980b9"; empty for none
     pre_wait_ms: int = 0  # wait this long after GO before the cue starts

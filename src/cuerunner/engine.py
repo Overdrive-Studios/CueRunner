@@ -118,6 +118,8 @@ class Voice:
     loop: bool = False
     loop_start: int = 0  # frames; the loop wraps between loop_start and loop_end (0 end = clip end)
     loop_end: int = 0
+    end: int = 0  # frames; playback stops here (0 = the end of the clip). Set by a cue's trim out.
+    fx: Any = None  # an fx.EqChain applied to this voice, or None for no processing
     bed: bool = False  # bed voices are lowered while ducking is active
     gain: float = 1.0
     tag: Any = None  # for the UI, e.g. the Cue this voice is playing
@@ -158,8 +160,14 @@ class Voice:
             self.env = self._fade_target
         return env.astype(np.float32)
 
+    def _end_frame(self) -> int:
+        """Where this voice stops: its trim out, or the end of the clip."""
+        if 0 < self.end <= self.clip.frames:
+            return self.end
+        return self.clip.frames
+
     def read(self, n: int) -> np.ndarray | None:
-        length = self.clip.frames
+        length = self._end_frame()
         if length == 0 or (not self.loop and self.position >= length):
             return None
         index = self.position + np.arange(n)
@@ -186,7 +194,7 @@ class Voice:
     def should_end(self) -> bool:
         if self.stop_when_done and self._fade_complete:
             return True
-        return not self.loop and self.position >= self.clip.frames
+        return not self.loop and self.position >= self._end_frame()
 
 
 class Mixer:
@@ -246,6 +254,8 @@ class Mixer:
                     continue
                 chunk = voice.read(frames)
                 if chunk is not None:
+                    if voice.fx is not None:
+                        chunk = voice.fx.process(chunk)
                     env = voice.envelope(len(chunk))
                     gain = voice.gain * (self._duck_current if voice.bed else 1.0)
                     out[: len(chunk)] += (chunk * (env * gain)[:, None]) @ voice.matrix

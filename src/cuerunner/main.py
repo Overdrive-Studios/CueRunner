@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cuerunner import allenheath, artnet, console_ui, launcher, midi, mtc, netsend, osc, sacn, settings_ui, spotify, spotify_ui, updater, video_out
+from cuerunner import allenheath, artnet, console_ui, fx, launcher, midi, mtc, netsend, osc, sacn, settings_ui, spotify, spotify_ui, updater, video_out
 from cuerunner.devices import DeviceInfo, label as devices_label
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
@@ -79,8 +79,17 @@ from cuerunner.version import __version__
 BACKUP_INTERVAL_MS = 15 * 60 * 1000  # automatic show snapshot every 15 minutes
 DMX_STEP_MS = 40  # light ramps send a new frame this often
 INSPECTOR_TABS = ["Basics", "Triggers", "I/O", "Time & Loops", "Levels", "Objects", "Trim", "Audio FX"]
-IMPLEMENTED_TABS = {"Basics", "Time & Loops", "Triggers"}
 CONTINUE_MODES = [("Do not continue", "none"), ("Auto-follow", "follow"), ("Auto-continue", "continue")]
+
+
+def _route_summary(route: list) -> str:
+    """Plain words for a cue's output routing, as the I/O tab and the cue dialog show it."""
+    if not route:
+        return "Default"
+    return "; ".join(
+        f"In {i + 1} → " + (", ".join(str(o) for o in group) if group else "none")
+        for i, group in enumerate(route)
+    )
 
 
 def _format_duration(ms: int) -> str:
@@ -847,10 +856,7 @@ class MainWindow(QMainWindow):
         editable = has_cue and self._editing
         self._insp_busy = True
         try:
-            for widget in (self.insp_name, self.insp_pre, self.insp_post, self.insp_continue,
-                           self.insp_colour, self.insp_hotkey, self.insp_notes, self.insp_armed,
-                           self.insp_loop, self.insp_loop_in, self.insp_loop_out,
-                           self.insp_trigger_tc):
+            for widget in self._insp_editable:
                 widget.setEnabled(editable)
             self.insp_full_edit.setEnabled(has_cue)
             if not has_cue:
@@ -861,6 +867,8 @@ class MainWindow(QMainWindow):
                 self.insp_armed.setChecked(False)
                 self.insp_loop.setChecked(False)
                 self.insp_trigger_tc.clear()
+                self.insp_route_label.setText("Default")
+                self.insp_objects_note.setText("")
                 return
             cue = cues[row]
             self.insp_number.setText(cue.number)
@@ -880,8 +888,46 @@ class MainWindow(QMainWindow):
             self.insp_loop_in.setValue(cue.loop_in)
             self.insp_loop_out.setValue(cue.loop_out)
             self.insp_trigger_tc.setText(cue.trigger_tc)
+            self.insp_route_label.setText(_route_summary(cue.route))
+            self.insp_volume.setValue(fx.gain_to_db(cue.volume))
+            self.insp_fade_in.setValue(cue.fade_in)
+            self.insp_fade_out.setValue(cue.fade_out)
+            self.insp_trim_in.setValue(cue.trim_in)
+            self.insp_trim_out.setValue(cue.trim_out)
+            self.insp_eq_low.setValue(cue.eq_low)
+            self.insp_eq_mid.setValue(cue.eq_mid)
+            self.insp_eq_high.setValue(cue.eq_high)
+            self._refresh_objects_tab(cue, editable)
         finally:
             self._insp_busy = False
+
+    def _refresh_objects_tab(self, cue: Cue, editable: bool) -> None:
+        """The Objects tab only applies to cues that put something on a screen."""
+        visual = cue.kind in ("video", "camera", "text")
+        self.insp_display.clear()
+        for label, value in video_out.output_choices(self.show_model.video_routes):
+            self.insp_display.addItem(label, value)
+        self.insp_display.setCurrentIndex(max(0, self.insp_display.findData(cue.video_output)))
+        self.insp_opacity.setValue(round(cue.opacity * 100))
+        self.insp_display.setEnabled(editable and visual)
+        self.insp_opacity.setEnabled(editable and cue.kind == "video")
+        if visual:
+            self.insp_objects_note.setText("Opacity applies to video cues.")
+        else:
+            self.insp_objects_note.setText(f"A {cue.kind} cue does not appear on a screen.")
+
+    def _inspector_routing(self) -> None:
+        """The Routing… button on the I/O tab, for the selected cue."""
+        row = self._selected_row()
+        cues = self.show_model.cues
+        if not 0 <= row < len(cues) or not self._editing:
+            return
+        cue = cues[row]
+        out_channels = self.mixer.out_channels if self.mixer is not None else MAX_CHANNELS
+        dialog = RoutingDialog(cue.route, out_channels, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            cue.route = dialog.result_route()
+            self.insp_route_label.setText(_route_summary(cue.route))
 
     def _inspector_apply(self) -> None:
         """Write the inspector fields back to the selected cue (Edit mode only)."""
@@ -914,6 +960,18 @@ class MainWindow(QMainWindow):
         cue.hotkey = self.insp_hotkey.keySequence().toString()
         cue.notes = self.insp_notes.toPlainText()
         cue.armed = self.insp_armed.isChecked()
+        cue.volume = fx.db_to_gain(self.insp_volume.value())
+        cue.fade_in = self.insp_fade_in.value()
+        cue.fade_out = self.insp_fade_out.value()
+        cue.trim_in = self.insp_trim_in.value()
+        cue.trim_out = self.insp_trim_out.value()
+        cue.eq_low = self.insp_eq_low.value()
+        cue.eq_mid = self.insp_eq_mid.value()
+        cue.eq_high = self.insp_eq_high.value()
+        if self.insp_display.isEnabled():
+            cue.video_output = self.insp_display.currentData() or ""
+        if self.insp_opacity.isEnabled():
+            cue.opacity = self.insp_opacity.value() / 100
         self._refresh_table()
         self._rebuild_shortcuts()
         self.table.selectRow(row)
@@ -1150,10 +1208,7 @@ class MainWindow(QMainWindow):
         self.insp_tabs.setObjectName("inspectorTabs")
         self.insp_tabs.setExpanding(False)
         for title in INSPECTOR_TABS:
-            index = self.insp_tabs.addTab(title)
-            if title not in IMPLEMENTED_TABS:
-                self.insp_tabs.setTabEnabled(index, False)
-                self.insp_tabs.setTabToolTip(index, "Coming in a later update")
+            self.insp_tabs.addTab(title)
         self.insp_tabs.setCurrentIndex(0)
         outer.addWidget(self.insp_tabs)
 
@@ -1249,20 +1304,132 @@ class MainWindow(QMainWindow):
         ggrid.setRowStretch(4, 1)
         built_pages["Time & Loops"] = time_page
 
+        # I/O: which outputs this cue's audio goes to.
+        io_page = QFrame()
+        io_page.setObjectName("inspectorPage")
+        iogrid = QGridLayout(io_page)
+        iogrid.setContentsMargins(12, 10, 12, 10)
+        self.insp_route_label = QLabel("Default")
+        self.insp_route_label.setWordWrap(True)
+        self.insp_route_button = QPushButton("Routing…")
+        iogrid.addWidget(QLabel("Outputs:"), 0, 0)
+        iogrid.addWidget(self.insp_route_label, 0, 1)
+        iogrid.addWidget(self.insp_route_button, 0, 2)
+        iogrid.setColumnStretch(1, 1)
+        iogrid.setRowStretch(1, 1)
+        built_pages["I/O"] = io_page
+
+        # Levels: this cue's own level, and its fades.
+        levels_page = QFrame()
+        levels_page.setObjectName("inspectorPage")
+        lgrid = QGridLayout(levels_page)
+        lgrid.setContentsMargins(12, 10, 12, 10)
+        self.insp_volume = QDoubleSpinBox()
+        self.insp_volume.setRange(-60.0, 12.0)
+        self.insp_volume.setDecimals(1)
+        self.insp_volume.setSuffix(" dB")
+        self.insp_volume.setMaximumWidth(140)
+        self.insp_fade_in = QDoubleSpinBox()
+        self.insp_fade_out = QDoubleSpinBox()
+        for spin in (self.insp_fade_in, self.insp_fade_out):
+            spin.setRange(0.0, 600.0)
+            spin.setDecimals(1)
+            spin.setSuffix(" s")
+            spin.setMaximumWidth(140)
+        for row, (caption, widget) in enumerate([("Level:", self.insp_volume),
+                                                 ("Fade in:", self.insp_fade_in),
+                                                 ("Fade out:", self.insp_fade_out)]):
+            lgrid.addWidget(QLabel(caption), row, 0)
+            lgrid.addWidget(widget, row, 1)
+        lgrid.addWidget(QLabel("-60 dB is silence; 0 dB plays the file at its own level."), 3, 0, 1, 2)
+        lgrid.setRowStretch(4, 1)
+        built_pages["Levels"] = levels_page
+
+        # Trim: play only part of the file.
+        trim_page = QFrame()
+        trim_page.setObjectName("inspectorPage")
+        trgrid = QGridLayout(trim_page)
+        trgrid.setContentsMargins(12, 10, 12, 10)
+        self.insp_trim_in = QDoubleSpinBox()
+        self.insp_trim_out = QDoubleSpinBox()
+        for spin in (self.insp_trim_in, self.insp_trim_out):
+            spin.setRange(0, 86400)
+            spin.setDecimals(3)
+            spin.setSuffix(" s")
+            spin.setMaximumWidth(140)
+        trgrid.addWidget(QLabel("Start at:"), 0, 0)
+        trgrid.addWidget(self.insp_trim_in, 0, 1)
+        trgrid.addWidget(QLabel("Stop at:"), 1, 0)
+        trgrid.addWidget(self.insp_trim_out, 1, 1)
+        trgrid.addWidget(QLabel("Stop at 0 plays to the end of the file."), 2, 0, 1, 2)
+        trgrid.setRowStretch(3, 1)
+        built_pages["Trim"] = trim_page
+
+        # Objects: where a video, camera or text cue appears.
+        objects_page = QFrame()
+        objects_page.setObjectName("inspectorPage")
+        ogrid = QGridLayout(objects_page)
+        ogrid.setContentsMargins(12, 10, 12, 10)
+        self.insp_display = QComboBox()
+        self.insp_opacity = QSpinBox()
+        self.insp_opacity.setRange(0, 100)
+        self.insp_opacity.setSuffix(" %")
+        self.insp_opacity.setMaximumWidth(140)
+        self.insp_objects_note = QLabel("")
+        self.insp_objects_note.setWordWrap(True)
+        ogrid.addWidget(QLabel("Display:"), 0, 0)
+        ogrid.addWidget(self.insp_display, 0, 1)
+        ogrid.addWidget(QLabel("Opacity:"), 1, 0)
+        ogrid.addWidget(self.insp_opacity, 1, 1)
+        ogrid.addWidget(self.insp_objects_note, 2, 0, 1, 2)
+        ogrid.setColumnStretch(1, 1)
+        ogrid.setRowStretch(3, 1)
+        built_pages["Objects"] = objects_page
+
+        # Audio FX: a three band EQ applied while the cue plays.
+        fx_page = QFrame()
+        fx_page.setObjectName("inspectorPage")
+        fgrid = QGridLayout(fx_page)
+        fgrid.setContentsMargins(12, 10, 12, 10)
+        self.insp_eq_low = QDoubleSpinBox()
+        self.insp_eq_mid = QDoubleSpinBox()
+        self.insp_eq_high = QDoubleSpinBox()
+        bands = fx.default_bands()
+        captions = [f"Low ({bands[0].freq:.0f} Hz):", f"Mid ({bands[1].freq:.0f} Hz):",
+                    f"High ({bands[2].freq:.0f} Hz):"]
+        for row, (caption, spin) in enumerate(zip(captions, (self.insp_eq_low, self.insp_eq_mid,
+                                                             self.insp_eq_high))):
+            spin.setRange(-24.0, 24.0)
+            spin.setDecimals(1)
+            spin.setSuffix(" dB")
+            spin.setMaximumWidth(140)
+            fgrid.addWidget(QLabel(caption), row, 0)
+            fgrid.addWidget(spin, row, 1)
+        fgrid.addWidget(QLabel("0 dB leaves the band alone. Applies to audio cues as they play."), 3, 0, 1, 2)
+        fgrid.setRowStretch(4, 1)
+        built_pages["Audio FX"] = fx_page
+
         # Placeholders for the tabs not built yet, so the stack lines up with the tab row.
         for title in INSPECTOR_TABS:
-            if title in built_pages:
-                self.insp_stack.addWidget(built_pages[title])
-                continue
-            placeholder = QFrame()
-            placeholder.setObjectName("inspectorPage")
-            pgrid = QVBoxLayout(placeholder)
-            pgrid.addWidget(QLabel(f"{title}: coming in a later update."))
-            pgrid.addStretch(1)
-            self.insp_stack.addWidget(placeholder)
+            self.insp_stack.addWidget(built_pages[title])
         self.insp_tabs.currentChanged.connect(self.insp_stack.setCurrentIndex)
         outer.addWidget(self.insp_stack)
 
+        # Every field that edits the selected cue, enabled together in Edit mode.
+        self._insp_editable = [
+            self.insp_name, self.insp_pre, self.insp_post, self.insp_continue, self.insp_colour,
+            self.insp_hotkey, self.insp_notes, self.insp_armed, self.insp_loop, self.insp_loop_in,
+            self.insp_loop_out, self.insp_trigger_tc, self.insp_route_button, self.insp_volume,
+            self.insp_fade_in, self.insp_fade_out, self.insp_trim_in, self.insp_trim_out,
+            self.insp_display, self.insp_opacity, self.insp_eq_low, self.insp_eq_mid,
+            self.insp_eq_high,
+        ]
+        self.insp_route_button.clicked.connect(self._inspector_routing)
+        for spin in (self.insp_volume, self.insp_fade_in, self.insp_fade_out, self.insp_trim_in,
+                     self.insp_trim_out, self.insp_eq_low, self.insp_eq_mid, self.insp_eq_high):
+            spin.valueChanged.connect(self._inspector_apply)
+        self.insp_opacity.valueChanged.connect(self._inspector_apply)
+        self.insp_display.currentIndexChanged.connect(self._inspector_apply)
         self.insp_trigger_tc.editingFinished.connect(self._inspector_apply)
         self.insp_loop.toggled.connect(self._inspector_apply)
         self.insp_loop_in.valueChanged.connect(self._inspector_apply)
@@ -1806,6 +1973,28 @@ class MainWindow(QMainWindow):
         rate = self.mixer.rate if self.mixer is not None else 48000
         return round(cue.loop_in * rate), round(cue.loop_out * rate)
 
+    def _trim_frames(self, cue: Cue) -> tuple[int, int]:
+        """A cue's trim in and out points as frames (0 out means the end of the file)."""
+        rate = self.mixer.rate if self.mixer is not None else 48000
+        return round(cue.trim_in * rate), round(cue.trim_out * rate)
+
+    def _cue_eq(self, cue: Cue, channels: int):
+        """The EQ chain for a cue, or None when all three bands are flat."""
+        bands = fx.default_bands()
+        for band, gain in zip(bands, (cue.eq_low, cue.eq_mid, cue.eq_high)):
+            band.gain_db = gain
+        rate = self.mixer.rate if self.mixer is not None else 48000
+        chain = fx.EqChain(bands=bands, rate=rate, channels=channels)
+        return None if chain.flat() else chain
+
+    def _apply_levels(self, voice: Voice, cue: Cue, clip) -> None:
+        """Level, trim points and EQ from the inspector's Levels, Trim and Audio FX tabs."""
+        voice.gain = max(0.0, cue.volume)
+        start, end = self._trim_frames(cue)
+        voice.position = min(max(start, 0), max(clip.frames - 1, 0))
+        voice.end = end
+        voice.fx = self._cue_eq(cue, clip.channels)
+
     def _start_midifile(self, cue: Cue) -> None:
         """Play the cue's MIDI file out to its port. It plays on in the background until it ends or Stop or Panic."""
         self._stop_midifile(cue)
@@ -1894,6 +2083,7 @@ class MainWindow(QMainWindow):
             paused=True,
             preloaded=True,
         )
+        self._apply_levels(voice, cue, clip)
         self.mixer.add(voice)
         self._cue_voices.append(voice)
 
@@ -2135,6 +2325,7 @@ class MainWindow(QMainWindow):
                 bed=True,
                 tag=cue,
             )
+            self._apply_levels(voice, cue, clip)
             if cue.fade_in > 0:
                 voice.env = 0.0
                 voice.fade(1.0, cue.fade_in, self.mixer.rate)
