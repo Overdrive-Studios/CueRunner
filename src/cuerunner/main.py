@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cuerunner import allenheath, artnet, console_ui, launcher, midi, netsend, osc, sacn, settings_ui, spotify, spotify_ui, updater, video_out
+from cuerunner import allenheath, artnet, console_ui, launcher, midi, mtc, netsend, osc, sacn, settings_ui, spotify, spotify_ui, updater, video_out
 from cuerunner.devices import DeviceInfo, label as devices_label
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
@@ -135,6 +135,7 @@ SPECIAL_KINDS = {
     "mic": "Mic",
     "network": "Network",
     "midi": "MIDI",
+    "timecode": "Timecode",
     "light": "Light",
     "osc": "OSC",
     "text": "Text",
@@ -365,7 +366,7 @@ class CueDialog(QDialog):
         if kind == "osc":
             form.addRow("Send to", self.osc_target_edit)
             form.addRow("Message", self.osc_message_edit)
-        if kind == "midi":
+        if kind in ("midi", "timecode"):
             self.midi_port_box = QComboBox()
             try:
                 ports = midi.output_port_names()
@@ -377,7 +378,16 @@ class CueDialog(QDialog):
                 self.midi_port_box.addItem(f"{cue.target} (not connected)", cue.target)
             self.midi_port_box.setCurrentIndex(max(0, self.midi_port_box.findData(cue.target)))
             form.addRow("MIDI port", self.midi_port_box)
-            form.addRow("Message", self.osc_message_edit)
+            if kind == "midi":
+                form.addRow("Message", self.osc_message_edit)
+            else:
+                self.timecode_start_edit = QLineEdit(cue.text or "00:00:00:00")
+                self.fps_box = QComboBox()
+                for rate in mtc.FRAME_RATES:
+                    self.fps_box.addItem(f"{rate} fps", rate)
+                self.fps_box.setCurrentIndex(max(0, self.fps_box.findData(cue.fps)))
+                form.addRow("Start at", self.timecode_start_edit)
+                form.addRow("Frame rate", self.fps_box)
         if kind in ("light", "network"):
             self.protocol_box = QComboBox()
             options = [("Art-Net", "artnet"), ("sACN", "sacn")] if kind == "light" else [("UDP", "udp"), ("TCP", "tcp")]
@@ -448,6 +458,10 @@ class CueDialog(QDialog):
         if cue.kind == "midi":
             cue.target = self.midi_port_box.currentData() or ""
             cue.text = self.osc_message_edit.text().strip()
+        if cue.kind == "timecode":
+            cue.target = self.midi_port_box.currentData() or ""
+            cue.text = self.timecode_start_edit.text().strip() or "00:00:00:00"
+            cue.fps = self.fps_box.currentData() or 30
         if cue.kind in ("light", "network"):
             cue.protocol = self.protocol_box.currentData()
         if cue.kind in ("osc", "light", "network"):
@@ -539,6 +553,7 @@ class MainWindow(QMainWindow):
         self._clips: dict[str, Clip] = {}
         self._cue_voices: list[Voice] = []
         self._timers: list[QTimer] = []
+        self._timecode_runs: dict[int, tuple] = {}  # id(cue) -> (cue, generator, timer, port)
         self._dmx_last: dict[tuple[str, int], dict[int, int]] = {}
         self._video = video_out.VideoOutputs(self)
         self._playing_cue: Cue | None = None
@@ -588,6 +603,7 @@ class MainWindow(QMainWindow):
         self._fit_to_screen()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        self._stop_timecode()
         self._video.close()
         super().closeEvent(event)
 
@@ -771,6 +787,8 @@ class MainWindow(QMainWindow):
             return f"{cue.text} to {cue.target}"
         if cue.kind == "midi":
             return f"{cue.text} to {cue.target or 'no port'}"
+        if cue.kind == "timecode":
+            return f"Start {cue.text or '00:00:00:00'} at {cue.fps} fps to {cue.target or 'no port'}"
         if cue.kind == "network":
             return f"{cue.protocol.upper()} {cue.text} to {cue.target}"
         if cue.kind == "mic":
@@ -1386,7 +1404,38 @@ class MainWindow(QMainWindow):
         else:
             self.go_row(target_row, replace=True)
 
+    def _start_timecode(self, cue: Cue) -> None:
+        """Start sending MIDI Timecode for this cue. It keeps running until a Stop cue or Panic."""
+        import mido
+
+        if not cue.target:
+            raise ValueError("Choose a MIDI output port for this cue.")
+        start_ms = mtc.parse_timecode(cue.text or "00:00:00:00", cue.fps)
+        self._stop_timecode(cue)
+        port = mido.open_output(cue.target)
+        gen = mtc.MtcGenerator(start_ms, cue.fps, lambda data: port.send(mido.Message.from_bytes(data)))
+        timer = QTimer(self)
+        timer.setInterval(max(1, round(gen.interval_ms)))
+        timer.timeout.connect(gen.tick)
+        self._timecode_runs[id(cue)] = (cue, gen, timer, port)
+        gen.start()
+        timer.start()
+
+    def _stop_timecode(self, cue: Cue | None = None) -> None:
+        """Stop the timecode generator for one cue, or for every cue when cue is None."""
+        for key, (owner, gen, timer, port) in list(self._timecode_runs.items()):
+            if cue is not None and owner is not cue:
+                continue
+            gen.stop()
+            timer.stop()
+            timer.deleteLater()
+            port.close()
+            del self._timecode_runs[key]
+
     def _stop_cue(self, target: Cue) -> None:
+        if target.kind == "timecode":
+            self._stop_timecode(target)
+            return
         if target.kind == "mic":
             self.stop_talkback()
             return
@@ -1584,6 +1633,13 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Cannot send MIDI cue", f"{cue.name}\n\n{exc}")
             self._finish(row)
             return
+        if cue.kind == "timecode":
+            try:
+                self._start_timecode(cue)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot start timecode", f"{cue.name}\n\n{exc}")
+            self._finish(row)
+            return
         if cue.kind == "light":
             try:
                 self._run_light(cue)
@@ -1693,6 +1749,7 @@ class MainWindow(QMainWindow):
             self.mixer.clear()
             self.mixer.paused = False
         self._cue_voices = []
+        self._stop_timecode()
         for timer in self._timers:
             timer.stop()
         self._timers = []
