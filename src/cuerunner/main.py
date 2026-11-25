@@ -698,9 +698,29 @@ class MainWindow(QMainWindow):
     def _refresh_inspector(self) -> None:
         if not hasattr(self, "inspector_label"):
             return
-        row = self.table.currentRow()
+        row = self._selected_row()
         cues = self.show_model.cues
-        if not 0 <= row < len(cues):
+        has_cue = 0 <= row < len(cues)
+        editable = has_cue and self._editing
+        self._insp_busy = True
+        try:
+            for widget in (self.insp_name, self.insp_pre, self.insp_post,
+                           self.insp_colour, self.insp_hotkey):
+                widget.setEnabled(editable)
+            self.insp_full_edit.setEnabled(editable)
+            if not has_cue:
+                self.insp_name.clear()
+            else:
+                cue = cues[row]
+                self.insp_name.setText(cue.name)
+                self.insp_pre.setValue(cue.pre_wait_ms / 1000)
+                self.insp_post.setValue(cue.post_wait_ms / 1000)
+                index = self.insp_colour.findData(cue.colour or "")
+                self.insp_colour.setCurrentIndex(max(index, 0))
+                self.insp_hotkey.setKeySequence(QKeySequence(cue.hotkey))
+        finally:
+            self._insp_busy = False
+        if not has_cue:
             self.inspector_label.setText("No cue selected")
             return
         cue = cues[row]
@@ -718,6 +738,26 @@ class MainWindow(QMainWindow):
         if cue.parent:
             parts.append(f"In group {cue.parent}")
         self.inspector_label.setText("  •  ".join(part for part in parts if part))
+
+    def _inspector_apply(self) -> None:
+        """Write the inspector fields back to the selected cue (Edit mode only)."""
+        if self._insp_busy or not self._editing:
+            return
+        row = self._selected_row()
+        cues = self.show_model.cues
+        if not 0 <= row < len(cues):
+            return
+        cue = cues[row]
+        name = self.insp_name.text().strip()
+        if name:
+            cue.name = name
+        cue.pre_wait_ms = int(self.insp_pre.value() * 1000)
+        cue.post_wait_ms = int(self.insp_post.value() * 1000)
+        cue.colour = self.insp_colour.currentData() or ""
+        cue.hotkey = self.insp_hotkey.keySequence().toString()
+        self._refresh_table()
+        self._rebuild_shortcuts()
+        self.table.selectRow(row)
 
     def _target_text(self, cue: Cue) -> str:
         """What the File column shows for each cue type."""
@@ -930,6 +970,42 @@ class MainWindow(QMainWindow):
         self.inspector_label.setWordWrap(True)
         layout.addWidget(self.inspector_label)
 
+        # Editable fields for the selected cue. They apply straight away in Edit mode;
+        # Full Edit opens the complete cue dialog for everything else.
+        self._insp_busy = False
+        self.inspector_bar = QFrame()
+        self.inspector_bar.setObjectName("inspectorBar")
+        bar = QHBoxLayout(self.inspector_bar)
+        bar.setContentsMargins(8, 4, 8, 4)
+        self.insp_name = QLineEdit()
+        self.insp_name.setMinimumWidth(160)
+        self.insp_pre = QDoubleSpinBox()
+        self.insp_post = QDoubleSpinBox()
+        for spin in (self.insp_pre, self.insp_post):
+            spin.setRange(0, 3600)
+            spin.setDecimals(1)
+            spin.setSuffix(" s")
+            spin.setMaximumWidth(100)
+        self.insp_colour = QComboBox()
+        for label, value in COLOURS:
+            self.insp_colour.addItem(label, value)
+        self.insp_hotkey = QKeySequenceEdit()
+        self.insp_hotkey.setMaximumWidth(160)
+        self.insp_full_edit = QPushButton("Full Edit…")
+        for caption, widget in [("Name", self.insp_name), ("Pre-wait", self.insp_pre),
+                                ("Post-wait", self.insp_post), ("Colour", self.insp_colour),
+                                ("Hotkey", self.insp_hotkey)]:
+            bar.addWidget(QLabel(caption))
+            bar.addWidget(widget, 1 if widget is self.insp_name else 0)
+        bar.addWidget(self.insp_full_edit)
+        self.insp_name.editingFinished.connect(self._inspector_apply)
+        self.insp_pre.valueChanged.connect(self._inspector_apply)
+        self.insp_post.valueChanged.connect(self._inspector_apply)
+        self.insp_colour.currentIndexChanged.connect(self._inspector_apply)
+        self.insp_hotkey.keySequenceChanged.connect(self._inspector_apply)
+        self.insp_full_edit.clicked.connect(self.edit_selected)
+        layout.addWidget(self.inspector_bar)
+
         bottom = QHBoxLayout()
         self.countdown = Countdown(self)
         self.soundboard = Soundboard(self)
@@ -985,6 +1061,7 @@ class MainWindow(QMainWindow):
         self._editing = editing
         self.edit_button.setChecked(editing)
         self.show_button.setChecked(not editing)
+        self._refresh_inspector()
 
     def _refresh_title(self) -> None:
         name = self.show_path.name if self.show_path else "Untitled"
