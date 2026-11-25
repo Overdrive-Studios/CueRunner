@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "UUID": "com.overdrive.cuerunner",
+  "Name": "CueRunner",
+  "Category": "CueRunner",
+  "Version": "0.1.0.0",
+  "Author": "Overdrive Studios",
+  "Description": "Send GO, STOP, PAUSE, PANIC and cue commands to CueRunner's phone remote.",
+  "Icon": "imgs/plugin",
+  "CodePath": "bin/plugin.mjs",
+  "Nodejs": {
+    "Version": "20"
+  },
+  "SDKVersion": 2,
+  "Software": {
+    "MinimumVersion": "6.8"
+  },
+  "OS": [
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    },
+    {
+      "Platform": "mac",
+      "MinimumVersion": "12"
+    }
+  ],
+  "Actions": [
+    {
+      "UUID": "com.overdrive.cuerunner.command",
+      "Name": "Send Command",
+      "Tooltip": "Send GO, STOP, PAUSE, PANIC, cue:N or pad:N to CueRunner",
+      "Icon": "imgs/action-icon",
+      "States": [
+        {
+          "Image": "imgs/action",
+          "TitleAlignment": "bottom"
+        }
+      ],
+      "PropertyInspectorPath": "ui/command.html",
+      "Controllers": [
+        "Keypad"
+      ]
+    }
+  ]
+}

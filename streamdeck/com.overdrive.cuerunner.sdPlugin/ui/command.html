@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>CueRunner command</title>
+  <style>
+    body { font-family: system-ui, sans-serif; font-size: 13px; margin: 12px; }
+    label { display: block; margin-top: 10px; }
+    input { width: 100%; box-sizing: border-box; padding: 4px; }
+    small { color: #666; }
+  </style>
+</head>
+<body>
+  <label>CueRunner computer address
+    <input id="host" placeholder="192.168.1.20">
+  </label>
+  <label>Port
+    <input id="port" placeholder="8080">
+  </label>
+  <label>Remote PIN
+    <input id="pin" type="password" placeholder="as set in CueRunner">
+  </label>
+  <label>Command
+    <input id="command" placeholder="go, stop, pause, panic, cue:0, pad:5">
+  </label>
+  <p><small>cue:N uses the row number, starting at 0 for the first cue. pad:N is the pad number from 0 to 63.
+  Start the phone remote in CueRunner first (Audio → Start Phone Remote).</small></p>
+
+  <script>
+    let socket;
+    let context;
+    const fields = ["host", "port", "pin", "command"];
+
+    function readFields() {
+      const values = {};
+      for (const id of fields) values[id] = document.getElementById(id).value.trim();
+      return values;
+    }
+
+    function save() {
+      socket.send(JSON.stringify({ event: "setSettings", context, payload: readFields() }));
+    }
+
+    function fill(settings) {
+      for (const id of fields) document.getElementById(id).value = settings[id] ?? "";
+    }
+
+    function connectElgatoStreamDeckSocket(port, uuid, registerEvent, info, actionInfo) {
+      context = actionInfo.context;
+      socket = new WebSocket(`ws://127.0.0.1:${port}`);
+      socket.onopen = () => socket.send(JSON.stringify({ event: registerEvent, uuid }));
+      socket.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        if (message.event === "didReceiveSettings") fill(message.payload.settings ?? {});
+      };
+      fill((actionInfo.payload && actionInfo.payload.settings) || {});
+      for (const id of fields) document.getElementById(id).addEventListener("change", save);
+    }
+  </script>
+</body>
+</html>
