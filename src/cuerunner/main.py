@@ -113,9 +113,9 @@ QPushButton#modeButton:checked { background: #6a6a70; color: #ffffff; }
 QLabel#cueCount { color: #c8c8cc; font-size: 13px; }
 """
 
-COLUMNS = ["#", "Name", "Length", "Fade In", "Fade Out", "Loop", "Then", "Progress", "Remaining", "Hotkey", "File"]
-PROGRESS_COL = 7
-REMAINING_COL = 8
+COLUMNS = ["#", "Name", "Pre-Wait", "Length", "Post-Wait", "Fade In", "Fade Out", "Loop", "Then", "Progress", "Remaining", "Hotkey", "File"]
+PROGRESS_COL = 9
+REMAINING_COL = 10
 NAME_COL = 1
 MAX_CHANNELS = 64
 
@@ -680,6 +680,30 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self) -> None:
         """No toolbar: the cue buttons sit above the cue list, as in QLab. File actions are in the File menu."""
 
+    def _refresh_inspector(self) -> None:
+        if not hasattr(self, "inspector_label"):
+            return
+        row = self.table.currentRow()
+        cues = self.show_model.cues
+        if not 0 <= row < len(cues):
+            self.inspector_label.setText("No cue selected")
+            return
+        cue = cues[row]
+        parts = [
+            f"Cue {cue.number}: {cue.name}",
+            cue.kind.title(),
+            self._target_text(cue),
+            f"Pre-wait {cue.pre_wait_ms / 1000:g} s",
+            f"Post-wait {cue.post_wait_ms / 1000:g} s",
+        ]
+        if cue.kind == "audio" or cue.kind == "video":
+            parts.append(f"Fade in {cue.fade_in:g} s, out {cue.fade_out:g} s")
+        if cue.hotkey:
+            parts.append(f"Hotkey {cue.hotkey}")
+        if cue.parent:
+            parts.append(f"In group {cue.parent}")
+        self.inspector_label.setText("  •  ".join(part for part in parts if part))
+
     def _target_text(self, cue: Cue) -> str:
         """What the File column shows for each cue type."""
         if cue.kind == "control":
@@ -874,11 +898,18 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(NAME_COL, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(len(COLUMNS) - 1, QHeaderView.ResizeMode.Stretch)
-        self.table.setColumnWidth(0, 60)
-        self.table.setColumnWidth(PROGRESS_COL, 140)
+        for col, width in [(0, 50), (2, 80), (3, 80), (4, 80), (5, 70), (6, 70), (7, 50), (8, 80),
+                           (PROGRESS_COL, 140), (REMAINING_COL, 100), (11, 80)]:
+            self.table.setColumnWidth(col, width)
         self.table.itemDoubleClicked.connect(lambda item: self.edit_row(item.row()))
         self.table.itemSelectionChanged.connect(self._refresh_now_label)
+        self.table.itemSelectionChanged.connect(self._refresh_inspector)
         layout.addWidget(self.table, 1)
+
+        self.inspector_label = QLabel("No cue selected")
+        self.inspector_label.setObjectName("inspector")
+        self.inspector_label.setWordWrap(True)
+        layout.addWidget(self.inspector_label)
 
         bottom = QHBoxLayout()
         self.countdown = Countdown(self)
@@ -954,7 +985,9 @@ class MainWindow(QMainWindow):
             values = [
                 f"{marker} {cue.number}".strip(),
                 ("    " if cue.parent else "") + cue.name,
+                f"{cue.pre_wait_ms / 1000:g} s" if cue.pre_wait_ms else "",
                 format_duration(cue.duration_ms),
+                f"{cue.post_wait_ms / 1000:g} s" if cue.post_wait_ms else "",
                 f"{cue.fade_in:g} s",
                 f"{cue.fade_out:g} s",
                 "✓" if cue.loop else "",
@@ -989,6 +1022,7 @@ class MainWindow(QMainWindow):
         self.trt_label.setText(format_hms(total_ms))
         self.soundboard.set_pads(self.show_model.pads)
         self._rebuild_shortcuts()
+        self._refresh_inspector()
         self._refresh_now_label()
         self._update_clock()
 

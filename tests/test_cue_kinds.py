@@ -184,3 +184,17 @@ def test_cue_colour_is_saved(tmp_path):
     path = tmp_path / "c.cuerunner.json"
     show.save(path)
     assert Show.load(path).cues[0].colour == "#2471a3"
+
+
+def test_inspector_describes_the_selected_cue(window):
+    from cuerunner.model import Cue
+
+    window.show_model.cues.append(Cue(number="4", name="Opening", kind="fade", target="3", level=0.0, seconds=2.0,
+                                      pre_wait_ms=500, hotkey="F4"))
+    window._refresh_table()
+    window.table.selectRow(0)
+    text = window.inspector_label.text()
+    assert "Cue 4: Opening" in text
+    assert "Fade cue 3 to 0% over 2 s" in text
+    assert "Pre-wait 0.5 s" in text
+    assert "Hotkey F4" in text
