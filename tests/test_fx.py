@@ -39,9 +39,11 @@ def test_every_effect_can_be_made_and_run():
         assert np.all(np.isfinite(out)), kind
 
 
-def test_every_effect_has_a_label_and_parameters():
+def test_every_effect_has_a_label_and_sensible_parameters():
     for kind, spec in fx.EFFECTS.items():
-        assert spec.label and spec.params, kind
+        assert spec.label, kind
+        # A plugin is set up in its own window, so it has no parameters here.
+        assert spec.params or kind == fx.VST_KIND, kind
         for param in spec.params:
             assert param.low <= param.default <= param.high, f"{kind}.{param.key}"
 

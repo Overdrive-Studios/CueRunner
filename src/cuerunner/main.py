@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cuerunner import allenheath, artnet, console_ui, fx, launcher, midi, mtc, netsend, osc, sacn, settings_ui, spotify, spotify_ui, updater, video_out, waveform
+from cuerunner import allenheath, artnet, console_ui, fx, vst, launcher, midi, mtc, netsend, osc, sacn, settings_ui, spotify, spotify_ui, updater, video_out, waveform
 from cuerunner.devices import DeviceInfo, label as devices_label
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
@@ -1166,6 +1166,61 @@ class MainWindow(QMainWindow):
         self._refresh_effects(cue)
         self.insp_fx_list.setCurrentRow(len(cue.effects) - 1)
 
+    def _add_plugin(self) -> None:
+        """Pick a VST3 or Audio Unit plugin and add it to the cue's chain."""
+        cue = self._selected_cue()
+        if cue is None or not self._editing:
+            return
+        if not vst.available():
+            QMessageBox.information(
+                self, "Plugins",
+                "Plugin hosting is not available in this build of CueRunner.")
+            return
+        found = vst.installed()
+        names = [vst.plugin_name(path) for path in found] + ["Choose a file\u2026"]
+        choice, ok = QInputDialog.getItem(self, "Add plugin", "Plugin:", names, 0, False)
+        if not ok:
+            return
+        if choice == names[-1]:
+            start = str(vst.plugin_folders()[0]) if vst.plugin_folders() else ""
+            chosen, _ = QFileDialog.getOpenFileName(
+                self, "Choose a plugin", start, "Plugins (*.vst3 *.component);;All files (*)")
+            if not chosen:
+                return
+            path = chosen
+        else:
+            path = str(found[names.index(choice)])
+
+        if vst.load(path) is None:
+            QMessageBox.warning(self, "Plugins",
+                                f"{vst.plugin_name(path)} could not be opened.\n\n"
+                                "It may be an instrument rather than an effect, or built "
+                                "for a different kind of Mac or PC.")
+            return
+        cue.effects.append({"kind": fx.VST_KIND, "path": path,
+                            "name": vst.plugin_name(path), "state": "", "bypass": False})
+        self._refresh_effects(cue)
+        self.insp_fx_list.setCurrentRow(len(cue.effects) - 1)
+
+    def _open_plugin_editor(self) -> None:
+        """Open the plugin's own window, and keep whatever was set up in it."""
+        cue = self._selected_cue()
+        row = self.insp_fx_list.currentRow()
+        if cue is None or not 0 <= row < len(cue.effects):
+            return
+        effect = cue.effects[row]
+        plugin = vst.load(str(effect.get("path", "")), str(effect.get("state", "")))
+        if plugin is None:
+            QMessageBox.warning(self, "Plugins",
+                                f"{effect.get('name', 'The plugin')} could not be opened.")
+            return
+        try:
+            plugin.show_editor()
+        except Exception as exc:
+            QMessageBox.warning(self, "Plugins", f"That plugin has no window to show:\n{exc}")
+            return
+        effect["state"] = vst.save_state(plugin)
+
     def _remove_effect(self) -> None:
         cue = self._selected_cue()
         row = self.insp_fx_list.currentRow()
@@ -1849,7 +1904,11 @@ class MainWindow(QMainWindow):
         self.insp_fx_params = EffectParams()
         fx_menu = QMenu(self.insp_fx_add)
         for spec in fx.EFFECT_LIST:
-            fx_menu.addAction(spec.label, lambda k=spec.kind: self._add_effect(k))
+            if spec.kind == fx.VST_KIND:
+                fx_menu.addSeparator()
+                fx_menu.addAction(spec.label + "\u2026", self._add_plugin)
+            else:
+                fx_menu.addAction(spec.label, lambda k=spec.kind: self._add_effect(k))
         self.insp_fx_add.setMenu(fx_menu)
 
         buttons = QHBoxLayout()
@@ -1907,6 +1966,7 @@ class MainWindow(QMainWindow):
         self.insp_levels.changed.connect(self._inspector_apply)
         self.insp_fx_list.currentRowChanged.connect(lambda _: self._refresh_effect_fields())
         self.insp_fx_params.changed.connect(self._inspector_apply)
+        self.insp_fx_params.editor_requested.connect(self._open_plugin_editor)
         self.insp_fx_remove.clicked.connect(self._remove_effect)
         self.insp_patch.currentIndexChanged.connect(self._inspector_apply)
         self.insp_set_default.clicked.connect(lambda: self.insp_levels.set_all(0))

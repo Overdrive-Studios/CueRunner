@@ -466,6 +466,18 @@ EFFECT_LIST = [
         Param("mix", "Mix", 0.0, 100.0, 25.0, " %", 0),
     ), lambda p, r, c: Reverb(p, r, c)),
 ]
+# A plugin is an effect like any other, but its settings live inside the plugin itself,
+# so it has no parameters of its own here; its own window is where it is set up.
+VST_KIND = "vst"
+
+
+def _build_vst(params: dict, rate: int, channels: int) -> Effect:
+    from cuerunner.vst import VstEffect
+
+    return VstEffect(params, rate, channels)
+
+
+EFFECT_LIST.append(EffectSpec(VST_KIND, "VST / Audio Unit plugin", (), _build_vst))
 EFFECTS = {spec.kind: spec for spec in EFFECT_LIST}
 
 
@@ -491,6 +503,11 @@ def describe(effect: dict) -> str:
     spec = EFFECTS.get(kind)
     if spec is None:
         return kind
+    if kind == VST_KIND:
+        name = str(effect.get("name") or "").strip()
+        return name or "Plugin (not set)"
+    if not spec.params:
+        return spec.label
     first = spec.params[0]
     value = float(effect.get(first.key, first.default))
     return f"{spec.label}  {value:.{first.decimals}f}{first.suffix}".rstrip()

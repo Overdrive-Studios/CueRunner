@@ -45,3 +45,12 @@ pip install -r requirements.txt
 python run_cuerunner.py
 python -m pytest
 ```
+
+## Licence
+
+CueRunner is released under the GNU General Public License v3 — see `LICENSE`.
+
+It hosts VST3 and Audio Unit plugins through
+[pedalboard](https://github.com/spotify/pedalboard), which is GPLv3 because it builds on
+JUCE. Shipping that inside CueRunner means CueRunner is GPLv3 too: anyone given a copy of
+the app is entitled to its source and may change and pass it on.
