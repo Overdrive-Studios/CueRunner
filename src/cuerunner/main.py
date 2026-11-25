@@ -73,6 +73,7 @@ from cuerunner.timecode import format_clock, format_duration, format_hms
 from cuerunner.version import __version__
 
 BACKUP_INTERVAL_MS = 15 * 60 * 1000  # automatic show snapshot every 15 minutes
+DMX_STEP_MS = 40  # light ramps send a new frame this often
 MAIN_QSS = """
 QWidget#mainWindow { background: #3b3b3f; }
 QPushButton#bigGo {
@@ -316,6 +317,7 @@ class CueDialog(QDialog):
         self.action_box.addItem("Stop", "stop")
         self.action_box.addItem("Pause", "pause")
         self.action_box.addItem("Resume", "resume")
+        self.action_box.addItem("Goto", "goto")
         self.light_universe = QSpinBox()
         self.light_universe.setRange(0, 32767)
         self.light_universe.setValue(cue.universe)
@@ -377,6 +379,7 @@ class CueDialog(QDialog):
             form.addRow("Node address", self.osc_target_edit)
             form.addRow("Universe", self.light_universe)
             form.addRow("Channels", self.osc_message_edit)
+            form.addRow("Ramp over", self.seconds_spin)
         if kind == "wait":
             form.addRow("Wait", self.wait_spin)
         if kind in ("text", "memo"):
@@ -437,6 +440,7 @@ class CueDialog(QDialog):
             cue.text = self.osc_message_edit.text().strip()
         if cue.kind == "light":
             cue.universe = self.light_universe.value()
+            cue.seconds = self.seconds_spin.value()
         if cue.kind == "control":
             cue.action = self.action_box.currentData()
         if cue.kind == "fade":
@@ -520,6 +524,7 @@ class MainWindow(QMainWindow):
         self._clips: dict[str, Clip] = {}
         self._cue_voices: list[Voice] = []
         self._timers: list[QTimer] = []
+        self._dmx_last: dict[tuple[str, int], dict[int, int]] = {}
         self._video = video_out.VideoOutputs(self)
         self._playing_cue: Cue | None = None
         self._row_bars: list[QProgressBar] = []
@@ -1201,6 +1206,27 @@ class MainWindow(QMainWindow):
         timer.start(max(0, ms))
         self._timers = [t for t in self._timers if t.isActive()] + [timer]
 
+    def _finish(self, row: int) -> None:
+        """An instant cue is done: in a playlist group start the next child, otherwise move the playhead."""
+        next_child = self._playlist_next_row(row)
+        if next_child is not None:
+            self.go_row(next_child, replace=False)
+        self._advance(row)
+
+    def _run_light(self, cue: Cue) -> None:
+        """Send a light cue's levels, ramping from the last levels sent to the same node and universe."""
+        levels = artnet.parse_levels(cue.text)
+        key = (cue.target, cue.universe)
+        start = self._dmx_last.get(key, {})
+        if cue.seconds <= 0:
+            artnet.send(cue.target, cue.universe, levels)
+        else:
+            steps = max(1, round(cue.seconds * 1000 / DMX_STEP_MS))
+            for step in range(1, steps + 1):
+                frame = artnet.ramp_levels(start, levels, step / steps)
+                self._after(step * DMX_STEP_MS, lambda f=frame: artnet.send(cue.target, cue.universe, f))
+        self._dmx_last[key] = dict(levels)
+
     def _advance(self, row: int) -> None:
         cues = self.show_model.cues
         self.table.selectRow(min(row + 1, len(cues) - 1))
@@ -1217,6 +1243,8 @@ class MainWindow(QMainWindow):
             self._stop_cue(target)
         elif cue.action in ("pause", "resume"):
             self._pause_cue(target, paused=cue.action == "pause")
+        elif cue.action == "goto":
+            self.table.selectRow(target_row)
         else:
             self.go_row(target_row, replace=True)
 
@@ -1359,31 +1387,35 @@ class MainWindow(QMainWindow):
             self.table.selectRow(min(row + 1, len(cues) - 1))
             return
         if cue.kind == "memo":
-            self._advance(row)
+            self._finish(row)
             return
         if cue.kind == "midi":
             try:
                 midi.send_out(cue.target, cue.text)
             except Exception as exc:
                 QMessageBox.warning(self, "Cannot send MIDI cue", f"{cue.name}\n\n{exc}")
-            self._advance(row)
+            self._finish(row)
             return
         if cue.kind == "light":
             try:
-                artnet.send(cue.target, cue.universe, artnet.parse_levels(cue.text))
+                self._run_light(cue)
             except Exception as exc:
                 QMessageBox.warning(self, "Cannot send light cue", f"{cue.name}\n\n{exc}")
-            self._advance(row)
+            self._finish(row)
             return
         if cue.kind == "osc":
             try:
                 osc.send(cue.target, cue.text)
             except Exception as exc:
                 QMessageBox.warning(self, "Cannot send OSC", f"{cue.name}\n\n{exc}")
-            self._advance(row)
+            self._finish(row)
             return
         if cue.kind == "wait":
-            self._after(cue.duration_ms, lambda: self.go_row(row + 1, replace=False) if row + 1 < len(cues) else None)
+            next_row = self._playlist_next_row(row)
+            if next_row is None:
+                next_row = row + 1 if row + 1 < len(cues) else None
+            if next_row is not None:
+                self._after(cue.duration_ms, lambda r=next_row: self.go_row(r, replace=False))
             self._advance(row)
             return
         if cue.kind == "group":
@@ -1398,18 +1430,19 @@ class MainWindow(QMainWindow):
             return
         if cue.kind == "control":
             self._control(cue)
-            self._advance(row)
+            if cue.action != "goto":  # Goto leaves the playhead on its target
+                self._finish(row)
             return
         if cue.kind == "text":
             try:
                 self._video.show_text(cue.video_output, cue.text, cue.font_size, self.show_model.video_routes)
             except Exception as exc:
                 QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
-            self._advance(row)
+            self._finish(row)
             return
         if cue.kind == "fade":
             self._fade_cue(cue)
-            self._advance(row)
+            self._finish(row)
             return
         if self.mixer is None:
             return

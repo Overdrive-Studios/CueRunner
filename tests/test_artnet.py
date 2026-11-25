@@ -52,3 +52,9 @@ def test_send_reaches_a_listener_on_the_given_port(monkeypatch):
     finally:
         listener.close()
     assert packet[18] == 200
+
+
+def test_ramp_levels_moves_between_start_and_end():
+    assert artnet.ramp_levels({1: 0}, {1: 200}, 0.5) == {1: 100}
+    assert artnet.ramp_levels({}, {2: 255}, 1.0) == {2: 255}
+    assert artnet.ramp_levels({1: 50}, {1: 50}, 0.0) == {1: 50}

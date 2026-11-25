@@ -53,3 +53,13 @@ def send(host: str, universe: int, levels: dict[int, int]) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.sendto(packet, (host, ARTNET_PORT))
+
+
+def ramp_levels(start: dict[int, int], end: dict[int, int], fraction: float) -> dict[int, int]:
+    """Levels partway between start and end. fraction 0 is start, 1 is end. Missing channels start at 0."""
+    fraction = min(1.0, max(0.0, fraction))
+    channels = set(start) | set(end)
+    return {
+        ch: round(start.get(ch, 0) + (end.get(ch, 0) - start.get(ch, 0)) * fraction)
+        for ch in sorted(channels)
+    }

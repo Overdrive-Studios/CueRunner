@@ -52,6 +52,34 @@ def test_playlist_group_moves_to_the_next_child(window):
     assert window._playlist_next_row(2) is None
 
 
+def test_goto_moves_the_playhead_without_firing(window):
+    from cuerunner.model import Cue
+
+    window.show_model.cues.extend([
+        Cue(number="1", name="a", kind="memo"),
+        Cue(number="2", name="b", kind="memo"),
+        Cue(number="3", name="go", kind="control", target="1", action="goto"),
+    ])
+    window._refresh_table()
+    window.go_row(2)
+    assert window.table.currentRow() == 0
+
+
+def test_light_ramp_sends_frames_then_the_final_levels(window):
+    from unittest import mock
+    from cuerunner import artnet
+
+    row = _add(window, "light", "1", target="127.0.0.1", text="1=200", universe=0, seconds=0.12)
+    with mock.patch.object(artnet, "send") as send:
+        window.go_row(row)
+        frames = [timer for timer in window._timers]
+        assert len(frames) == 3
+        for timer in frames:
+            timer.timeout.emit()
+    assert send.call_count == 3
+    assert send.call_args.args[2] == {1: 200}
+
+
 def test_fire_all_group_has_no_playlist_next(window):
     from cuerunner.model import Cue
 
