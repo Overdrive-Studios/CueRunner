@@ -19,8 +19,10 @@ Cue-based show control for Windows and macOS. Working name.
 
 ## Known limits
 
-- **Console control:** Yamaha, Allen & Heath, and Q-SYS control are not built yet. They need each manufacturer's protocol documentation and hardware to test against.
-- **Spotify:** not built. It needs a developer app and a Premium account, and playback runs in a browser.
+- **Allen & Heath SQ (standard):** built from the SQ MIDI Protocol Issue 5 document. Set the console's IP under Audio → Allen & Heath Console. Scene recall, mute, and level are supported, and console cues use commands such as `scene 7`, `mute 1`, or `level 1 -6`. Test on the desk before relying on it.
+- **Allen & Heath dLive, Avantis, Qu, SQ+:** not built yet. Each needs its current protocol document.
+- **Yamaha and Q-SYS:** not built yet. They need each manufacturer's protocol documentation and hardware to test against.
+- **Spotify:** needs a Spotify developer app (Client ID) and a Premium account. Set up under Audio → Spotify. Add cues with Add Spotify Cue. Playback runs on a Spotify device that is already open on the computer or speaker you choose.
 - **Stream Deck:** not built as a plugin. The phone remote's HTTP endpoint can be called from a Stream Deck web-request action, using the `X-PIN` header.
 - **MIDI mapping:** the defaults are notes 36 to 39 (GO, STOP, PAUSE, PANIC). Change them under Audio → MIDI Mapping. The mapping is saved with the show file.
 - **Audio files:** each file is decoded fully into memory when it is first loaded. Very long files use a lot of memory.
