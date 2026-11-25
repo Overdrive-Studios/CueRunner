@@ -116,6 +116,8 @@ class Voice:
     clip: Clip
     matrix: np.ndarray
     loop: bool = False
+    loop_start: int = 0  # frames; the loop wraps between loop_start and loop_end (0 end = clip end)
+    loop_end: int = 0
     bed: bool = False  # bed voices are lowered while ducking is active
     gain: float = 1.0
     tag: Any = None  # for the UI, e.g. the Cue this voice is playing
@@ -162,14 +164,24 @@ class Voice:
             return None
         index = self.position + np.arange(n)
         if self.loop:
-            index %= length
-            self.position = (self.position + n) % length
+            start, end = self._loop_bounds(length)
+            span = end - start
+            index = np.where(index >= end, start + (index - start) % span, index)
+            nxt = self.position + n
+            if nxt >= end:
+                nxt = start + (nxt - start) % span
+            self.position = nxt
         else:
             index = index[index < length]
             self.position += len(index)
             if self.position >= length:
                 self.natural_end = True
         return self.clip.data[index]
+
+    def _loop_bounds(self, length: int) -> tuple[int, int]:
+        end = self.loop_end if 0 < self.loop_end <= length else length
+        start = min(max(self.loop_start, 0), end - 1)
+        return start, end
 
     def should_end(self) -> bool:
         if self.stop_when_done and self._fade_complete:

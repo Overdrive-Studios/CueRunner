@@ -50,3 +50,23 @@ def test_devamp_cue_clears_only_its_target_cues_loop():
             assert mixer is window.mixer
         finally:
             window.close()
+
+
+def test_loop_wraps_only_between_its_markers():
+    clip = Clip(np.arange(10, dtype=np.float32).reshape(-1, 1))
+    voice = Voice(clip=clip, matrix=np.ones((1, 2), dtype=np.float32), loop=True, loop_start=2, loop_end=6)
+    voice.position = 4
+    got = voice.read(6)[:, 0].tolist()
+    assert got == [4.0, 5.0, 2.0, 3.0, 4.0, 5.0]  # wraps from 6 back to 2, not to 0
+    assert voice.loop is True
+
+
+def test_devamp_inside_a_loop_plays_out_to_the_end_of_the_clip():
+    clip = Clip(np.arange(10, dtype=np.float32).reshape(-1, 1))
+    voice = Voice(clip=clip, matrix=np.ones((1, 2), dtype=np.float32), loop=True, loop_start=2, loop_end=6)
+    voice.position = 4
+    mixer = Mixer(rate=48000, out_channels=2)
+    mixer.devamp(voice)
+    rest = voice.read(100)[:, 0].tolist()
+    assert rest == [4.0, 5.0, 6.0, 7.0, 8.0, 9.0]  # finishes the loop pass, then the outro
+    assert voice.natural_end

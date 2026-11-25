@@ -262,6 +262,18 @@ class CueDialog(QDialog):
         self.fade_out = self._fade_spin(cue.fade_out)
         self.loop_box = QCheckBox("Loop until stopped")
         self.loop_box.setChecked(cue.loop)
+        self.loop_in_spin = QDoubleSpinBox()
+        self.loop_in_spin.setRange(0, 86400)
+        self.loop_in_spin.setDecimals(2)
+        self.loop_in_spin.setSuffix(" s")
+        self.loop_in_spin.setValue(cue.loop_in)
+        self.loop_in_spin.setToolTip("Where the loop starts. 0 means the start of the file.")
+        self.loop_out_spin = QDoubleSpinBox()
+        self.loop_out_spin.setRange(0, 86400)
+        self.loop_out_spin.setDecimals(2)
+        self.loop_out_spin.setSuffix(" s")
+        self.loop_out_spin.setValue(cue.loop_out)
+        self.loop_out_spin.setToolTip("Where the loop wraps back to the loop start. 0 means the end of the file.")
         self.then_box = QComboBox()
         self.then_box.addItem("Nothing", "none")
         self.then_box.addItem("Follow: start the next cue when this one ends", "follow")
@@ -288,6 +300,8 @@ class CueDialog(QDialog):
         form.addRow("Fade in", self.fade_in)
         form.addRow("Fade out", self.fade_out)
         form.addRow("", self.loop_box)
+        form.addRow("Loop in", self.loop_in_spin)
+        form.addRow("Loop out", self.loop_out_spin)
         form.addRow("Then", self.then_box)
         form.addRow("Hotkey", self.hotkey_edit)
         outputs_row = QHBoxLayout()
@@ -508,6 +522,8 @@ class CueDialog(QDialog):
         cue.fade_in = self.fade_in.value()
         cue.fade_out = self.fade_out.value()
         cue.loop = self.loop_box.isChecked()
+        cue.loop_in = self.loop_in_spin.value()
+        cue.loop_out = self.loop_out_spin.value()
         cue.then = self.then_box.currentData()
         cue.hotkey = self.hotkey_edit.keySequence().toString()
         cue.route = [list(group) for group in self._route]
@@ -1572,6 +1588,11 @@ class MainWindow(QMainWindow):
             if not voice.done and voice.tag is target:
                 voice.paused = paused
 
+    def _loop_frames(self, cue: Cue) -> tuple[int, int]:
+        """A cue's loop in and out points as frames at the mixer's rate (0 means the file's start or end)."""
+        rate = self.mixer.rate if self.mixer is not None else 48000
+        return round(cue.loop_in * rate), round(cue.loop_out * rate)
+
     def _start_midifile(self, cue: Cue) -> None:
         """Play the cue's MIDI file out to its port. It plays on in the background until it ends or Stop or Panic."""
         self._stop_midifile(cue)
@@ -1653,6 +1674,8 @@ class MainWindow(QMainWindow):
             clip=clip,
             matrix=route_matrix(cue.route, clip.channels, self.mixer.out_channels),
             loop=cue.loop,
+            loop_start=self._loop_frames(cue)[0],
+            loop_end=self._loop_frames(cue)[1],
             bed=True,
             tag=cue,
             paused=True,
@@ -1893,6 +1916,8 @@ class MainWindow(QMainWindow):
                 clip=clip,
                 matrix=route_matrix(cue.route, clip.channels, self.mixer.out_channels),
                 loop=cue.loop,
+                loop_start=self._loop_frames(cue)[0],
+                loop_end=self._loop_frames(cue)[1],
                 bed=True,
                 tag=cue,
             )
