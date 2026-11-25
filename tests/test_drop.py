@@ -1,4 +1,5 @@
 """Drag and drop: dropped files become cues by type, and unknown files are reported."""
+from pathlib import Path
 
 from cuerunner.dropped import kind_for_path, split_drop
 
@@ -40,6 +41,6 @@ def test_dropped_files_insert_cues_after_the_selected_row(tmp_path):
             kinds = [c.kind for c in window.show_model.cues]
             assert names == ["first", "a", "b"]
             assert kinds == ["memo", "audio", "midifile"]
-            assert window.show_model.cues[1].file == "/show/a.wav"
+            assert Path(window.show_model.cues[1].file) == Path("/show/a.wav")  # separators differ on Windows
         finally:
             window.close()
