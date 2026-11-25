@@ -6,6 +6,8 @@ MIDI thread and only queue commands; the UI thread runs them.
 
 from __future__ import annotations
 
+import threading
+
 import re
 from collections.abc import Callable
 
@@ -105,11 +107,50 @@ def output_port_names() -> list[str]:
     return list(mido.get_output_names())
 
 
+# MIDI Show Control: F0 7F <device> 02 <command format> <command> <data> F7
+MSC_COMMANDS = {"go": 0x01, "stop": 0x02, "reset": 0x0A, "gooff": 0x0B}
+MSC_ALL_DEVICES = 0x7F
+MSC_ALL_TYPES = 0x7F
+
+
+def _sysex_spec(values: list[int]) -> dict:
+    """A full SysEx message, F0 to F7 inclusive, as a mido spec without the framing bytes."""
+    if len(values) < 2 or values[0] != 0xF0 or values[-1] != 0xF7:
+        raise ValueError("SysEx must start with F0 and end with F7, for example: sysex F0 7F 01 02 01 01 F7")
+    body = values[1:-1]
+    if any(b > 0x7F for b in body):
+        raise ValueError("SysEx data bytes must be 00 to 7F.")
+    return {"type": "sysex", "data": body}
+
+
+def msc_spec(command: str, q_number: str = "") -> dict:
+    """'msc go 3.5' -> a MIDI Show Control SysEx for GO cue 3.5 to all devices and all command types."""
+    name = command.lower()
+    if name not in MSC_COMMANDS:
+        raise ValueError("MSC command must be one of: go, stop, reset, gooff.")
+    try:
+        data = list(q_number.encode("ascii"))
+    except UnicodeEncodeError:
+        raise ValueError("MSC cue numbers must be plain ASCII.")
+    body = [MSC_ALL_DEVICES, 0x02, MSC_ALL_TYPES, MSC_COMMANDS[name], *data]
+    return {"type": "sysex", "data": body}
+
+
 def parse_out(text: str) -> dict:
     """'note_on 60 127 2' -> a mido message spec. Channels run 1 to 16 and default to 1."""
     parts = text.split()
     if not parts:
         raise ValueError("Enter a MIDI message, for example: note_on 60 127")
+    if parts[0].lower() == "sysex":
+        try:
+            values = [int(token, 16) for token in parts[1:]]
+        except ValueError:
+            raise ValueError("SysEx bytes are hex, for example: F0 7F 01 02 01 01 F7")
+        return _sysex_spec(values)
+    if parts[0].lower() == "msc":
+        if len(parts) < 2:
+            raise ValueError("Enter an MSC command, for example: msc go 3.5")
+        return msc_spec(parts[1], " ".join(parts[2:]))
     kind, args = parts[0].lower(), parts[1:]
     numbers = []
     for token in args:
@@ -160,3 +201,46 @@ def send_out(port_name: str, text: str) -> None:
     spec = parse_out(text)
     with mido.open_output(port_name) as port:
         port.send(mido.Message(**spec))
+
+
+# --- MIDI file cues: play a standard MIDI file out to a port ------------------------
+
+class MidiFilePlayer:
+    """Plays a standard MIDI file out to a port on a background thread, at the file's own tempo.
+
+    stop() takes effect before the next message; it can wait out one long gap in the file.
+    """
+
+    def __init__(self, path: str, port_name: str) -> None:
+        import mido
+
+        if not port_name:
+            raise ValueError("Choose a MIDI output port for this cue.")
+        self._file = mido.MidiFile(path)
+        self._port_name = port_name
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        import mido
+
+        with mido.open_output(self._port_name) as port:
+            for message in self._file.play():
+                if self._stop.is_set():
+                    break
+                if not message.is_meta:
+                    port.send(message)
+            if self._stop.is_set():
+                port.reset()  # release notes that were still sounding

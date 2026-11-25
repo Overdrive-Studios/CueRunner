@@ -145,6 +145,7 @@ SPECIAL_KINDS = {
     "devamp": "Devamp",
     "target": "Target",
     "program": "Run Program",
+    "midifile": "MIDI File",
     "control": "Control",
     "wait": "Wait",
     "group": "Group",
@@ -399,7 +400,7 @@ class CueDialog(QDialog):
         if kind == "osc":
             form.addRow("Send to", self.osc_target_edit)
             form.addRow("Message", self.osc_message_edit)
-        if kind in ("midi", "timecode"):
+        if kind in ("midi", "timecode", "midifile"):
             self.midi_port_box = QComboBox()
             try:
                 ports = midi.output_port_names()
@@ -413,6 +414,15 @@ class CueDialog(QDialog):
             form.addRow("MIDI port", self.midi_port_box)
             if kind == "midi":
                 form.addRow("Message", self.osc_message_edit)
+            elif kind == "midifile":
+                self.midifile_edit = QLineEdit(cue.file)
+                self.midifile_edit.setPlaceholderText("Path to a .mid file")
+                browse = QPushButton("Browse…")
+                browse.clicked.connect(self._browse_midifile)
+                file_row = QHBoxLayout()
+                file_row.addWidget(self.midifile_edit, 1)
+                file_row.addWidget(browse)
+                form.addRow("MIDI file", file_row)
             else:
                 self.timecode_start_edit = QLineEdit(cue.text or "00:00:00:00")
                 self.fps_box = QComboBox()
@@ -472,6 +482,11 @@ class CueDialog(QDialog):
         spin.setValue(value)
         return spin
 
+    def _browse_midifile(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(self, "Choose a MIDI file", "", "MIDI files (*.mid *.midi)")
+        if filename:
+            self.midifile_edit.setText(filename)
+
     def _browse_program(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(self, "Choose a program", "")
         if filename:
@@ -514,6 +529,9 @@ class CueDialog(QDialog):
         if cue.kind == "midi":
             cue.target = self.midi_port_box.currentData() or ""
             cue.text = self.osc_message_edit.text().strip()
+        if cue.kind == "midifile":
+            cue.target = self.midi_port_box.currentData() or ""
+            cue.file = self.midifile_edit.text().strip()
         if cue.kind == "timecode":
             cue.target = self.midi_port_box.currentData() or ""
             cue.text = self.timecode_start_edit.text().strip() or "00:00:00:00"
@@ -609,6 +627,7 @@ class MainWindow(QMainWindow):
         self._clips: dict[str, Clip] = {}
         self._cue_voices: list[Voice] = []
         self._timers: list[QTimer] = []
+        self._midifile_runs: dict[int, tuple] = {}  # id(cue) -> (cue, player)
         self._timecode_runs: dict[int, tuple] = {}  # id(cue) -> (cue, generator, timer, port)
         self._dmx_last: dict[tuple[str, int], dict[int, int]] = {}
         self._video = video_out.VideoOutputs(self)
@@ -663,6 +682,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         self._stop_timecode()
+        self._stop_midifile()
         self._video.close()
         super().closeEvent(event)
 
@@ -840,6 +860,8 @@ class MainWindow(QMainWindow):
             return f"{cue.action.title()} cue {cue.target}"
         if cue.kind == "devamp":
             return f"Ends the loop on cue {cue.target}"
+        if cue.kind == "midifile":
+            return f"{Path(cue.file).name or 'no file'} to {cue.target or 'no port'}"
         if cue.kind == "program":
             return f"Runs {cue.file or 'no program'} {cue.text}".rstrip()
         if cue.kind == "target":
@@ -1518,6 +1540,9 @@ class MainWindow(QMainWindow):
         if target.kind == "timecode":
             self._stop_timecode(target)
             return
+        if target.kind == "midifile":
+            self._stop_midifile(target)
+            return
         if target.kind == "mic":
             self.stop_talkback()
             return
@@ -1546,6 +1571,20 @@ class MainWindow(QMainWindow):
         for voice in self._cue_voices:
             if not voice.done and voice.tag is target:
                 voice.paused = paused
+
+    def _start_midifile(self, cue: Cue) -> None:
+        """Play the cue's MIDI file out to its port. It plays on in the background until it ends or Stop or Panic."""
+        self._stop_midifile(cue)
+        player = midi.MidiFilePlayer(cue.file, cue.target)
+        self._midifile_runs[id(cue)] = (cue, player)
+        player.start()
+
+    def _stop_midifile(self, cue: Cue | None = None) -> None:
+        for key, (owner, player) in list(self._midifile_runs.items()):
+            if cue is not None and owner is not cue:
+                continue
+            player.stop()
+            del self._midifile_runs[key]
 
     def _run_program(self, cue: Cue) -> None:
         """Start a program with the arguments typed on the cue. No shell is used, so nothing is interpreted."""
@@ -1808,6 +1847,13 @@ class MainWindow(QMainWindow):
             self._devamp_cue(cue)
             self._finish(row)
             return
+        if cue.kind == "midifile":
+            try:
+                self._start_midifile(cue)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot play MIDI file", f"{cue.name}\n\n{exc}")
+            self._finish(row)
+            return
         if cue.kind == "program":
             try:
                 self._run_program(cue)
@@ -1884,6 +1930,7 @@ class MainWindow(QMainWindow):
             self.mixer.paused = False
         self._cue_voices = []
         self._stop_timecode()
+        self._stop_midifile()
         for timer in self._timers:
             timer.stop()
         self._timers = []
