@@ -57,6 +57,10 @@ class Cue:
     trigger_tc: str = ""  # HH:MM:SS:FF; fires when incoming timecode passes it (empty for none)
     fps: int = 30  # timecode cues: MIDI Timecode frame rate (24, 25 or 30)
     volume: float = 1.0  # Levels tab: the cue's own level, 0 to about 4 (0 dB = 1.0)
+    patch: str = ""  # I/O tab: the audio patch this cue plays out of (empty = the first one)
+    output_levels: list = field(default_factory=list)  # Levels tab: per output level in dB
+    output_mutes: list = field(default_factory=list)  # Levels tab: per output mute
+    output_solos: list = field(default_factory=list)  # Levels tab: per output solo
     midi_trigger_on: bool = False  # Triggers: fire this cue from an incoming MIDI message
     midi_trigger_kind: str = "note_on"  # "note_on", "note_off" or "control_change"
     midi_trigger_number: int = 0  # the note or controller number
@@ -130,6 +134,19 @@ def _prune(path: Path, keep: int) -> None:
         stale.unlink()
 
 
+@dataclass
+class AudioPatch:
+    """A named audio output, as QLab calls a patch: a device and how many channels it has."""
+
+    name: str = "Patch 1"
+    device: str = ""  # empty means the system default output
+    channels: int = 2
+
+
+def _default_patches() -> list[AudioPatch]:
+    return [AudioPatch()]
+
+
 def _empty_pads() -> list[Pad]:
     return [Pad() for _ in range(PAD_COUNT)]
 
@@ -140,6 +157,7 @@ class Show:
     cues: list[Cue] = field(default_factory=list)
     pads: list[Pad] = field(default_factory=_empty_pads)
     radio: RadioSettings = field(default_factory=RadioSettings)
+    audio_patches: list[AudioPatch] = field(default_factory=_default_patches)
     midi_map: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MIDI_MAP))
     duck_level: float = DEFAULT_DUCK_LEVEL  # music level while the talkback mic is open, 0 to 1
     remote_port: int = DEFAULT_REMOTE_PORT
@@ -183,6 +201,7 @@ class Show:
             "cues": [asdict(c) for c in self.cues],
             "pads": [asdict(p) for p in self.pads],
             "radio": asdict(self.radio),
+            "audio_patches": [asdict(p) for p in self.audio_patches],
             "midi_map": dict(self.midi_map),
             "duck_level": self.duck_level,
             "remote_port": self.remote_port,
@@ -205,6 +224,9 @@ class Show:
         pads = [Pad(**{k: v for k, v in p.items() if k in pad_fields}) for p in data.get("pads", [])]
         pads = (pads + _empty_pads())[:PAD_COUNT]
         radio = RadioSettings(**{k: v for k, v in data.get("radio", {}).items() if k in radio_fields})
+        patch_fields = set(AudioPatch.__dataclass_fields__)
+        patches = [AudioPatch(**{k: v for k, v in p.items() if k in patch_fields})
+                   for p in data.get("audio_patches", []) if isinstance(p, dict)]
         midi_map = data.get("midi_map", DEFAULT_MIDI_MAP)
         duck_level = min(1.0, max(0.0, float(data.get("duck_level", DEFAULT_DUCK_LEVEL))))
         return cls(
@@ -212,6 +234,7 @@ class Show:
             cues=cues,
             pads=pads,
             radio=radio,
+            audio_patches=patches or _default_patches(),
             midi_map=dict(midi_map),
             duck_level=duck_level,
             remote_port=int(data.get("remote_port", DEFAULT_REMOTE_PORT)),

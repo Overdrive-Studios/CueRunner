@@ -46,13 +46,44 @@ def test_every_tab_is_enabled_and_has_its_own_page(window):
 
 
 def test_the_levels_tab_sets_the_cues_own_level(window):
+    """The "main" fader is the cue's own level."""
     from cuerunner.model import Cue
 
     select(window, Cue(number="1", name="Song", kind="audio"))
-    window.insp_volume.setValue(-6.0)
+    window.insp_levels._strips[0]["slider"].setValue(-6)
     assert window.show_model.cues[0].volume == pytest.approx(0.501, rel=0.01)
-    window.insp_volume.setValue(-60.0)  # the bottom of the range is silence
+    window.insp_levels._strips[0]["slider"].setValue(-60)  # the bottom is silence
     assert window.show_model.cues[0].volume == 0.0
+
+
+def test_the_output_faders_reach_the_playing_voice(window):
+    from cuerunner.model import Cue
+
+    select(window, Cue(number="1", name="Song", kind="audio",
+                       output_levels=[0.0, -60.0], output_mutes=[False, False],
+                       output_solos=[False, False]))
+    cue = window.show_model.cues[0]
+    voice, clip = a_voice(channels=2)
+    window._apply_levels(voice, cue, clip)
+    assert voice.matrix[:, 0].max() > 0     # output 1 still sounds
+    assert voice.matrix[:, 1].max() == 0    # output 2 was pulled to silence
+
+
+def test_the_io_tab_shows_the_file_and_its_patch(window):
+    from cuerunner.model import Cue
+
+    select(window, Cue(number="1", name="Song", kind="audio", file="/tmp/song.wav"))
+    assert window.insp_file_target.text() == "/tmp/song.wav"
+    assert window.insp_patch.count() >= 1
+    assert "out" in window.insp_patch_format.text()
+
+
+def test_the_fader_count_follows_the_chosen_patch(window):
+    from cuerunner.model import AudioPatch, Cue
+
+    window.show_model.audio_patches = [AudioPatch(name="Main", channels=4)]
+    select(window, Cue(number="1", name="Song", kind="audio", patch="Main"))
+    assert window.insp_levels.output_count() == 4
 
 
 def test_the_level_reaches_the_playing_voice(window):
@@ -158,7 +189,7 @@ def test_inspector_fields_are_read_only_in_show_mode(window):
 
     select(window, Cue(number="1", name="Song", kind="audio"))
     window._set_mode(editing=False)
-    assert not window.insp_volume.isEnabled()
+    assert not window.insp_levels._strips[0]["slider"].isEnabled()
     assert not window.insp_start_time.isEnabled()
     assert not window.insp_route_button.isEnabled()
 
