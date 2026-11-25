@@ -141,6 +141,7 @@ SPECIAL_KINDS = {
     "text": "Text",
     "fade": "Fade",
     "devamp": "Devamp",
+    "target": "Target",
     "control": "Control",
     "wait": "Wait",
     "group": "Group",
@@ -365,6 +366,11 @@ class CueDialog(QDialog):
             form.addRow("Action", self.action_box)
         if kind == "devamp":
             form.addRow("Loop cue", self.target_edit)
+        if kind == "target":
+            self.new_target_edit = QLineEdit(cue.new_target)
+            self.new_target_edit.setPlaceholderText("Cue number, or a file path for audio and video")
+            form.addRow("Cue to change", self.target_edit)
+            form.addRow("New target", self.new_target_edit)
         if kind == "fade":
             form.addRow("Cue number", self.target_edit)
             form.addRow("Fade to", self.level_spin)
@@ -471,8 +477,10 @@ class CueDialog(QDialog):
         cue.post_wait_ms = int(self.post_wait_spin.value() * 1000)
         cue.trigger_tc = self.trigger_tc_edit.text().strip()
         cue.colour = self.colour_box.currentData() or ""
-        if cue.kind in ("control", "fade", "devamp"):
+        if cue.kind in ("control", "fade", "devamp", "target"):
             cue.target = self.target_edit.text().strip()
+        if cue.kind == "target":
+            cue.new_target = self.new_target_edit.text().strip()
         if cue.kind == "midi":
             cue.target = self.midi_port_box.currentData() or ""
             cue.text = self.osc_message_edit.text().strip()
@@ -802,6 +810,8 @@ class MainWindow(QMainWindow):
             return f"{cue.action.title()} cue {cue.target}"
         if cue.kind == "devamp":
             return f"Ends the loop on cue {cue.target}"
+        if cue.kind == "target":
+            return f"Cue {cue.target} now targets {cue.new_target or 'nothing'}"
         if cue.kind == "fade":
             return f"Fade cue {cue.target} to {round(cue.level * 100)}% over {cue.seconds:g} s"
         if cue.kind == "wait":
@@ -1491,6 +1501,20 @@ class MainWindow(QMainWindow):
             if not voice.done and voice.tag is target:
                 voice.paused = paused
 
+    def _retarget_cue(self, cue: Cue) -> None:
+        """Point the named cue at a new target: a cue number for control, fade and devamp cues, a file for audio and video."""
+        number = cue.target.strip()
+        new = cue.new_target.strip()
+        target = next((c for c in self.show_model.cues if c.number == number), None)
+        if target is None:
+            raise ValueError(f"There is no cue {number or '(blank)'} to change.")
+        if target.kind in ("control", "fade", "devamp", "target"):
+            target.target = new
+        elif target.kind in ("audio", "video"):
+            target.file = new
+        else:
+            raise ValueError(f"Cue {number} ({target.kind}) has no target to change.")
+
     def _devamp_cue(self, cue: Cue) -> None:
         """Stop the loop on the target cue's playing voices so they play out to the end."""
         if self.mixer is None:
@@ -1725,6 +1749,13 @@ class MainWindow(QMainWindow):
             return
         if cue.kind == "devamp":
             self._devamp_cue(cue)
+            self._finish(row)
+            return
+        if cue.kind == "target":
+            try:
+                self._retarget_cue(cue)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot change target", f"{cue.name}\n\n{exc}")
             self._finish(row)
             return
         if self.mixer is None:
