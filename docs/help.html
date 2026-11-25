@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help: CueRunner</title>
+<link rel="icon" href="icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="nav">
+  <a class="brand" href="index.html"><img src="icon.png" alt="">CueRunner</a>
+  <nav class="links">
+    <a href="features.html" >Features</a>
+    <a href="download.html" >Download</a>
+    <a href="help.html" class="active">Help</a>
+  </nav>
+</header>
+
+<main class="wrap">
+  <section class="hero" style="padding-bottom:24px">
+    <h1>Help</h1>
+    <p class="lead">Answers to the questions that come up most.</p>
+  </section>
+
+  <section class="section">
+    <details open>
+      <summary>The Mac app says it can't be opened</summary>
+      <p>Right-click CueRunner in Applications and choose <strong>Open</strong>, then click <strong>Open</strong> again. If macOS says the app is damaged, open Terminal and run <code>xattr -dr com.apple.quarantine /Applications/CueRunner.app</code>, then try again.</p>
+    </details>
+    <details>
+      <summary>Windows shows a warning when I run it</summary>
+      <p>Choose <strong>More info</strong>, then <strong>Run anyway</strong>. The app isn't code-signed yet, so Windows doesn't recognise it.</p>
+    </details>
+    <details>
+      <summary>How do I update?</summary>
+      <p>Inside CueRunner, choose <strong>Help &gt; Check for Updates</strong>. It downloads and installs the new version.</p>
+    </details>
+    <details>
+      <summary>Command-comma doesn't open Settings on my Mac</summary>
+      <p>Settings is in the CueRunner app menu on a Mac, with the shortcut Command-comma. Use the menu if the shortcut doesn't respond.</p>
+    </details>
+    <details>
+      <summary>How do I control the show from my phone?</summary>
+      <p>Start the phone remote from the Audio menu and choose a PIN. Then open the address it shows in a phone browser on the same network and enter the PIN.</p>
+    </details>
+    <details>
+      <summary>Where are my show files backed up?</summary>
+      <p>Each save copies the previous version into a <code>backups</code> folder next to the show file. CueRunner also takes a snapshot every 15 minutes, keeping the newest 20.</p>
+    </details>
+  </section>
+
+  <section class="section center">
+    <h2>Still stuck?</h2>
+    <p style="color:var(--muted)">Open an issue on <a href="https://github.com/Overdrive-Studios/CueRunner/issues">GitHub</a>.</p>
+  </section>
+</main>
+<footer>
+  CueRunner is made by Overdrive Studios. <a href="https://github.com/Overdrive-Studios/CueRunner">Source on GitHub</a>
+</footer>
+</body>
+</html>
