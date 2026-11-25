@@ -126,6 +126,7 @@ class Voice:
     followed: bool = False
     stop_when_done: bool = False
     paused: bool = False  # a paused voice keeps its place and makes no sound until resumed
+    preloaded: bool = False  # loaded by a Load cue: ready at its start, silent until its cue is run
     _fade_start: float = 1.0
     _fade_target: float = 1.0
     _fade_total: int = 0

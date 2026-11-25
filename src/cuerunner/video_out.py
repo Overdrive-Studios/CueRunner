@@ -110,6 +110,7 @@ class _Output:
         self.session = QMediaCaptureSession()
         self.session.setVideoOutput(self.widget)
         self.camera: QCamera | None = None
+        self.cue_number = ""
         self.text_window: QLabel | None = None
         self.widget.setGeometry(screen.geometry())
         self.screen = screen
@@ -168,10 +169,11 @@ class VideoOutputs(QObject):
         out.show_on_screen(fit)
         return out
 
-    def play(self, output: str, path: str, routes: list[dict] | None = None) -> None:
+    def play(self, output: str, path: str, routes: list[dict] | None = None, number: str = "") -> None:
         out = self._output_for(output, routes or [])
         out.stop_camera()
         out.hide_text()
+        out.cue_number = number
         out.player.setSource(QUrl.fromLocalFile(path))
         out.player.play()
 
@@ -188,6 +190,18 @@ class VideoOutputs(QObject):
             out.camera.setCameraDevice(device)
         out.session.setCamera(out.camera)
         out.camera.start()
+
+    def volume(self, number: str) -> float | None:
+        """The audio level of the video playing for this cue number, or None if none is playing."""
+        for out in self._outputs.values():
+            if out.cue_number == number and out.player.playbackState() != QMediaPlayer.PlaybackState.StoppedState:
+                return out.audio.volume()
+        return None
+
+    def set_volume(self, number: str, volume: float) -> None:
+        for out in self._outputs.values():
+            if out.cue_number == number:
+                out.audio.setVolume(min(1.0, max(0.0, volume)))
 
     def show_text(self, output: str, text: str, size: int, routes: list[dict] | None = None) -> None:
         out = self._output_for(output, routes or [])

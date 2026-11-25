@@ -319,6 +319,7 @@ class CueDialog(QDialog):
         self.action_box.addItem("Pause", "pause")
         self.action_box.addItem("Resume", "resume")
         self.action_box.addItem("Goto", "goto")
+        self.action_box.addItem("Load", "load")
         self.light_universe = QSpinBox()
         self.light_universe.setRange(0, 32767)
         self.light_universe.setValue(cue.universe)
@@ -1300,6 +1301,8 @@ class MainWindow(QMainWindow):
             self._pause_cue(target, paused=cue.action == "pause")
         elif cue.action == "goto":
             self.table.selectRow(target_row)
+        elif cue.action == "load":
+            self._preload(target)
         else:
             self.go_row(target_row, replace=True)
 
@@ -1331,12 +1334,48 @@ class MainWindow(QMainWindow):
                 voice.paused = paused
 
     def _fade_cue(self, cue: Cue) -> None:
+        number = cue.target.strip()
+        target = next((c for c in self.show_model.cues if c.number == number), None)
+        if target is not None and target.kind == "video":
+            self._ramp_video(number, cue.level, cue.seconds)
+            return
         if self.mixer is None:
             return
-        number = cue.target.strip()
         for voice in self._cue_voices:
             if not voice.done and voice.tag.number == number:
                 voice.fade(cue.level, cue.seconds, self.mixer.rate)
+
+    def _ramp_video(self, number: str, level: float, seconds: float) -> None:
+        """Move a playing video's audio level to the target over the given seconds."""
+        start = self._video.volume(number)
+        if start is None:
+            return
+        if seconds <= 0:
+            self._video.set_volume(number, level)
+            return
+        steps = max(1, round(seconds * 1000 / DMX_STEP_MS))
+        for step in range(1, steps + 1):
+            value = start + (level - start) * step / steps
+            self._after(step * DMX_STEP_MS, lambda v=value: self._video.set_volume(number, v))
+
+    def _preload(self, cue: Cue) -> None:
+        """Load an audio cue into the mixer paused, so running it later starts at once."""
+        if self.mixer is None or cue.kind != "audio" or not cue.file:
+            return
+        if any(v.tag is cue and not v.done for v in self._cue_voices):
+            return
+        clip = self._clip(cue.file)
+        voice = Voice(
+            clip=clip,
+            matrix=route_matrix(cue.route, clip.channels, self.mixer.out_channels),
+            loop=cue.loop,
+            bed=True,
+            tag=cue,
+            paused=True,
+            preloaded=True,
+        )
+        self.mixer.add(voice)
+        self._cue_voices.append(voice)
 
     def add_camera_cue(self) -> None:
         patches = self.show_model.video_inputs
@@ -1429,7 +1468,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\nThis video cue has no file.")
             else:
                 try:
-                    self._video.play(cue.video_output, cue.file, self.show_model.video_routes)
+                    self._video.play(cue.video_output, cue.file, self.show_model.video_routes, cue.number)
                 except Exception as exc:
                     QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
             self.table.selectRow(min(row + 1, len(cues) - 1))
@@ -1514,9 +1553,18 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
                 return
+            ready = next((v for v in self._cue_voices if v.tag is cue and v.preloaded and not v.done), None)
+            if ready is not None:
+                ready.paused = False
+                ready.preloaded = False
+                self._playing_cue = cue
+                if cue.then == "continue" and row + 1 < len(cues):
+                    self.go_row(row + 1, replace=False)
+                self.table.selectRow(min(row + 1, len(cues) - 1))
+                return
             if replace:
                 for voice in self._cue_voices:
-                    if not voice.done and not voice.stop_when_done:
+                    if not voice.done and not voice.stop_when_done and not voice.preloaded:
                         self.mixer.fade_out(voice, voice.tag.fade_out)
             voice = Voice(
                 clip=clip,
@@ -1619,7 +1667,8 @@ class MainWindow(QMainWindow):
                         self.go_row(row + 1, replace=False)
 
         self._cue_voices = [v for v in self._cue_voices if not v.done]
-        active = self._cue_voices[-1].tag if self._cue_voices else None
+        sounding = [v for v in self._cue_voices if not v.preloaded]
+        active = sounding[-1].tag if sounding else None
         if active is not self._playing_cue:
             self._playing_cue = active
             self._refresh_table()

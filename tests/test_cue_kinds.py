@@ -198,3 +198,28 @@ def test_inspector_describes_the_selected_cue(window):
     assert "Fade cue 3 to 0% over 2 s" in text
     assert "Pre-wait 0.5 s" in text
     assert "Hotkey F4" in text
+
+
+def test_load_then_start_resumes_the_same_voice(window, tmp_path):
+    import numpy as np
+    import soundfile as sf
+
+    from cuerunner.engine import Mixer
+    from cuerunner.model import Cue
+
+    wav = tmp_path / "tone.wav"
+    sf.write(str(wav), np.full((2000, 1), 0.5, dtype=np.float32), 1000)
+    window.mixer = Mixer(rate=1000, out_channels=2)
+    window.show_model.cues.append(Cue(number="1", name="tone", kind="audio", file=str(wav)))
+    window.show_model.cues.append(Cue(number="2", name="load", kind="control", target="1", action="load"))
+    window._refresh_table()
+
+    window.go_row(1)
+    preloaded = [v for v in window._cue_voices if v.tag is window.show_model.cues[0]]
+    assert len(preloaded) == 1 and preloaded[0].paused and preloaded[0].preloaded
+    assert window._playing_cue is None  # loaded, not playing
+
+    window.go_row(0)
+    assert len(window._cue_voices) == 1  # no second voice
+    assert not preloaded[0].paused and not preloaded[0].preloaded
+    assert window._playing_cue is window.show_model.cues[0]
