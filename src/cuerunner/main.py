@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cuerunner import allenheath, artnet, console_ui, launcher, osc, settings_ui, spotify, spotify_ui, updater, video_out
+from cuerunner import allenheath, artnet, console_ui, launcher, midi, osc, settings_ui, spotify, spotify_ui, updater, video_out
 from cuerunner.devices import DeviceInfo, label as devices_label
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
@@ -131,6 +131,7 @@ COLOURS = [
     ("Purple", "#7d3c98"),
 ]
 SPECIAL_KINDS = {
+    "midi": "MIDI",
     "light": "Light",
     "osc": "OSC",
     "text": "Text",
@@ -359,6 +360,19 @@ class CueDialog(QDialog):
         if kind == "osc":
             form.addRow("Send to", self.osc_target_edit)
             form.addRow("Message", self.osc_message_edit)
+        if kind == "midi":
+            self.midi_port_box = QComboBox()
+            try:
+                ports = midi.output_port_names()
+            except Exception:
+                ports = []
+            for port in ports:
+                self.midi_port_box.addItem(port, port)
+            if cue.target and self.midi_port_box.findData(cue.target) < 0:
+                self.midi_port_box.addItem(f"{cue.target} (not connected)", cue.target)
+            self.midi_port_box.setCurrentIndex(max(0, self.midi_port_box.findData(cue.target)))
+            form.addRow("MIDI port", self.midi_port_box)
+            form.addRow("Message", self.osc_message_edit)
         if kind == "light":
             form.addRow("Node address", self.osc_target_edit)
             form.addRow("Universe", self.light_universe)
@@ -409,6 +423,9 @@ class CueDialog(QDialog):
         cue.colour = self.colour_box.currentData() or ""
         if cue.kind in ("control", "fade"):
             cue.target = self.target_edit.text().strip()
+        if cue.kind == "midi":
+            cue.target = self.midi_port_box.currentData() or ""
+            cue.text = self.osc_message_edit.text().strip()
         if cue.kind in ("osc", "light"):
             cue.target = self.osc_target_edit.text().strip()
             cue.text = self.osc_message_edit.text().strip()
@@ -660,6 +677,8 @@ class MainWindow(QMainWindow):
             return f"Wait {cue.duration_ms / 1000:g} s"
         if cue.kind == "osc":
             return f"{cue.text} to {cue.target}"
+        if cue.kind == "midi":
+            return f"{cue.text} to {cue.target or 'no port'}"
         if cue.kind == "light":
             return f"Universe {cue.universe}: {cue.text} to {cue.target}"
         if cue.kind == "group":
@@ -1319,6 +1338,13 @@ class MainWindow(QMainWindow):
             self.table.selectRow(min(row + 1, len(cues) - 1))
             return
         if cue.kind == "memo":
+            self._advance(row)
+            return
+        if cue.kind == "midi":
+            try:
+                midi.send_out(cue.target, cue.text)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot send MIDI cue", f"{cue.name}\n\n{exc}")
             self._advance(row)
             return
         if cue.kind == "light":
