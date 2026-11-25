@@ -62,6 +62,7 @@ class Show:
     midi_map: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MIDI_MAP))
     duck_level: float = DEFAULT_DUCK_LEVEL  # music level while the talkback mic is open, 0 to 1
     remote_port: int = DEFAULT_REMOTE_PORT
+    spotify_client_id: str = ""  # from the Spotify developer app; not a secret when using PKCE
 
     def next_number(self) -> str:
         numbers = []
@@ -82,6 +83,7 @@ class Show:
             "midi_map": dict(self.midi_map),
             "duck_level": self.duck_level,
             "remote_port": self.remote_port,
+            "spotify_client_id": self.spotify_client_id,
         }
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -105,4 +107,5 @@ class Show:
             midi_map=dict(midi_map),
             duck_level=duck_level,
             remote_port=int(data.get("remote_port", DEFAULT_REMOTE_PORT)),
+            spotify_client_id=str(data.get("spotify_client_id", "")),
         )

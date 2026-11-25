@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cuerunner import updater
+from cuerunner import spotify, spotify_ui, updater
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
 from cuerunner.feedback import FeedbackSuppressor
@@ -230,6 +230,8 @@ class MainWindow(QMainWindow):
         self._remote_state: RemoteState | None = None
         self._midi: MidiInput | None = None
         self._midi_commands: queue.Queue[str] = queue.Queue()
+        self._spotify: spotify.SpotifyClient | None = None
+        self._spotify_playing = False
 
         self._build_toolbar()
         self._build_menus()
@@ -316,6 +318,7 @@ class MainWindow(QMainWindow):
         bar.addSeparator()
         for label, handler in [
             ("Add Audio Cue...", self.add_audio_cue),
+            ("Add Spotify Cue...", self.add_spotify_cue),
             ("Edit Cue...", self.edit_selected),
             ("Remove Cue", self.remove_cue),
         ]:
@@ -341,6 +344,7 @@ class MainWindow(QMainWindow):
         audio_menu.addAction("MIDI Mapping...", self.edit_midi_mapping)
         audio_menu.addAction("Duck Level...", self.choose_duck_level)
         audio_menu.addAction("Phone Remote Port...", self.choose_remote_port)
+        audio_menu.addAction("Spotify...", self.open_spotify)
         audio_menu.addSeparator()
         audio_menu.addAction("Start Venue Radio", self.start_radio)
         audio_menu.addAction("Stop Venue Radio", self.stop_radio)
@@ -565,6 +569,42 @@ class MainWindow(QMainWindow):
 
     # --- Cue actions --------------------------------------------------
 
+    def add_spotify_cue(self) -> None:
+        text, ok = QInputDialog.getText(self, "Add Spotify cue", "Paste a Spotify link or spotify: URI:")
+        if not ok:
+            return
+        uri = spotify.uri_from_text(text)
+        if uri is None:
+            QMessageBox.warning(self, "Add Spotify cue", "That doesn't look like a Spotify link or URI.")
+            return
+        cue = Cue(number=self.show_model.next_number(), name=uri.split(":")[-1], kind="spotify", file=uri)
+        self.show_model.cues.append(cue)
+        self._refresh_table()
+
+    def open_spotify(self) -> None:
+        dialog = spotify_ui.SpotifyDialog(self.show_model.spotify_client_id, self._set_spotify_client, self)
+        dialog.exec()
+        self.show_model.spotify_client_id = dialog.client_id.text().strip()
+
+    def _set_spotify_client(self, client: spotify.SpotifyClient) -> None:
+        self._spotify = client
+
+    def _spotify_client(self) -> spotify.SpotifyClient | None:
+        if self._spotify is None:
+            self._spotify = spotify_ui.load_client(self.show_model.spotify_client_id)
+        return self._spotify
+
+    def _play_spotify_cue(self, cue: Cue) -> None:
+        if not cue.file:
+            return
+        self._spotify_playing = True
+        spotify_ui.send(self, self._spotify_client(), cue.name, lambda c: c.play(cue.file))
+
+    def _pause_spotify(self) -> None:
+        if self._spotify_playing:
+            self._spotify_playing = False
+            spotify_ui.send(self, self._spotify_client(), "Spotify pause", lambda c: c.pause())
+
     def add_audio_cue(self) -> None:
         filenames, _ = QFileDialog.getOpenFileNames(self, "Add audio cues", "", AUDIO_FILTER)
         new_cues = []
@@ -623,9 +663,15 @@ class MainWindow(QMainWindow):
         replace=True fades out whatever cue is already playing. replace=False lets it run on.
         """
         cues = self.show_model.cues
-        if self.mixer is None or not 0 <= row < len(cues):
+        if not 0 <= row < len(cues):
             return
         cue = cues[row]
+        if cue.kind == "spotify":
+            self._play_spotify_cue(cue)
+            self.table.selectRow(min(row + 1, len(cues) - 1))
+            return
+        if self.mixer is None:
+            return
         if cue.kind == "audio" and cue.file:
             try:
                 clip = self._clip(cue.file)
@@ -654,6 +700,7 @@ class MainWindow(QMainWindow):
         self.table.selectRow(min(row + 1, len(cues) - 1))
 
     def stop(self) -> None:
+        self._pause_spotify()
         if self.mixer is None:
             return
         for voice in self._cue_voices:
@@ -668,6 +715,7 @@ class MainWindow(QMainWindow):
 
     def panic(self) -> None:
         """Stop everything immediately, with no fade, including pads."""
+        self._pause_spotify()
         if self.mixer is not None:
             self.mixer.clear()
             self.mixer.paused = False
