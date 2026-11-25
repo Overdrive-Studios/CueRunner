@@ -11,29 +11,66 @@
 <header class="nav">
   <a class="brand" href="index.html"><img src="icon.png" alt="">CueRunner</a>
   <nav class="links">
-    <a href="features.html" >Features</a>
-    <a href="download.html" >Download</a>
-    <a href="help.html" >Help</a>
+    <a href="features.html">Features</a>
+    <a href="download.html">Download</a>
+    <a href="help.html">Help</a>
   </nav>
 </header>
-
 <main class="wrap">
-  <section class="hero">
-    <img src="icon.png" alt="CueRunner icon">
-    <h1>Run your show from one place</h1>
-    <p class="lead">CueRunner is a QLab-style show control app for Windows and Mac. Cues, a soundboard, venue radio, talkback and console control, all in one window.</p>
-    <p style="margin-top:30px"><a class="btn" href="download.html">Download CueRunner</a><a class="btn ghost" href="features.html">See features</a></p>
+
+  <section class="hero-split">
+    <div class="copy">
+      <p class="eyebrow">Show control for Windows and Mac</p>
+      <h1>Run the whole show from one window.</h1>
+      <p class="lead">CueRunner runs your cues, soundboard, venue radio, talkback and console control together, so the show stays in one place.</p>
+      <div class="actions">
+        <a class="btn" href="download.html">Download CueRunner</a>
+        <a class="btn ghost" href="features.html">See all features</a>
+      </div>
+    </div>
+
+    <div class="app" aria-hidden="true">
+      <div class="app-bar"><span></span><span></span><span></span></div>
+      <div class="app-transport">
+        <div class="t-go">GO</div>
+        <div class="t-stop">STOP</div>
+        <div class="t-pause">PAUSE</div>
+        <div class="t-panic">PANIC</div>
+      </div>
+      <div class="app-cues">
+        <div class="row"><span>#</span><span>Name</span><span>Length</span><span>Progress</span></div>
+        <div class="row"><span>1</span><span>House music in</span><span>3:10</span><span></span></div>
+        <div class="row playing"><span>2</span><span>Walk-on track</span><span>2:45</span><span class="bar"><i></i></span></div>
+        <div class="row"><span>3</span><span>Interval music</span><span>0:45</span><span></span></div>
+      </div>
+      <div class="app-pads">
+        <div>Applause</div><div>Sting</div><div>Bed</div><div>Door</div>
+        <div>Bell</div><div>Whoosh</div><div>Drop</div><div>Sweep</div>
+      </div>
+    </div>
   </section>
 
   <section class="section">
-    <h2 class="center">Everything in one window</h2>
-    <div class="grid" style="margin-top:24px">
-      <div class="card"><h3>Cue list</h3><p>Fades, loops, follow and continue, and a countdown.</p></div>
-      <div class="card"><h3>Soundboard</h3><p>64 pads in four banks, with ducking under talkback.</p></div>
+    <p class="eyebrow center">Features</p>
+    <h2 class="center">Everything a show needs</h2>
+    <div class="feature-grid" style="margin-top:28px">
+      <div class="card"><h3>Cue list</h3><p>Fades in and out, loops, follow and continue, hotkeys and a countdown.</p></div>
+      <div class="card"><h3>Soundboard</h3><p>64 pads in four banks, with ducking under the talkback mic.</p></div>
+      <div class="card"><h3>Venue radio</h3><p>Shuffled music from a folder, with idents between tracks.</p></div>
       <div class="card"><h3>Consoles</h3><p>Allen &amp; Heath SQ, dLive, Avantis and Qu-5/6/7 over the network.</p></div>
-      <div class="card"><h3>Phone and Stream Deck</h3><p>Run the show from a phone browser behind a PIN, or a Stream Deck.</p></div>
+      <div class="card"><h3>Phone and Stream Deck</h3><p>Run the show from a phone browser behind a PIN, or from a Stream Deck.</p></div>
+      <div class="card"><h3>Recorder and Spotify</h3><p>Record up to 48 tracks, and play Spotify tracks as cues.</p></div>
     </div>
+    <p class="center" style="margin-top:24px"><a href="features.html">See every feature &rarr;</a></p>
   </section>
+
+  <section class="band">
+    <h2>Ready when you are</h2>
+    <p class="lead" style="margin:0 auto 26px">Download for Windows or Mac. Updates install from inside the app.</p>
+    <a class="btn" href="download.html">Download CueRunner</a>
+    <a class="btn ghost" href="help.html">Installation help</a>
+  </section>
+
 </main>
 <footer>
   CueRunner is made by Overdrive Studios. <a href="https://github.com/Overdrive-Studios/CueRunner">Source on GitHub</a>
