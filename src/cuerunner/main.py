@@ -321,6 +321,9 @@ class CueDialog(QDialog):
         self.trigger_tc_edit = QLineEdit(cue.trigger_tc)
         self.trigger_tc_edit.setPlaceholderText("Blank for none, e.g. 00:01:30:00")
         form.addRow("Timecode trigger", self.trigger_tc_edit)
+        self.armed_box = QCheckBox("Armed (GO skips disarmed cues)")
+        self.armed_box.setChecked(cue.armed)
+        form.addRow("", self.armed_box)
         self.target_edit = QLineEdit(cue.target)
         self.target_edit.setPlaceholderText("Cue number, e.g. 3")
         self.action_box = QComboBox()
@@ -330,6 +333,9 @@ class CueDialog(QDialog):
         self.action_box.addItem("Resume", "resume")
         self.action_box.addItem("Goto", "goto")
         self.action_box.addItem("Load", "load")
+        self.action_box.addItem("Reset", "reset")
+        self.action_box.addItem("Arm", "arm")
+        self.action_box.addItem("Disarm", "disarm")
         self.light_universe = QSpinBox()
         self.light_universe.setRange(0, 32767)
         self.light_universe.setValue(cue.universe)
@@ -496,6 +502,7 @@ class CueDialog(QDialog):
         cue.pre_wait_ms = int(self.pre_wait_spin.value() * 1000)
         cue.post_wait_ms = int(self.post_wait_spin.value() * 1000)
         cue.trigger_tc = self.trigger_tc_edit.text().strip()
+        cue.armed = self.armed_box.isChecked()
         cue.colour = self.colour_box.currentData() or ""
         if cue.kind in ("control", "fade", "devamp", "target"):
             cue.target = self.target_edit.text().strip()
@@ -1446,6 +1453,15 @@ class MainWindow(QMainWindow):
         cues = self.show_model.cues
         self.table.selectRow(min(row + 1, len(cues) - 1))
 
+    def _reset_cue(self, target: Cue) -> None:
+        """Stop the cue at once and return it to its unplayed state."""
+        if self.mixer is not None:
+            self.mixer.kill(target)
+        self._stop_timecode(target)
+        if target.kind in ("video", "camera", "text"):
+            self._video.stop_all()
+        self._refresh_table()
+
     def _control(self, cue: Cue) -> None:
         number = cue.target.strip()
         cues = self.show_model.cues
@@ -1462,6 +1478,11 @@ class MainWindow(QMainWindow):
             self.table.selectRow(target_row)
         elif cue.action == "load":
             self._preload(target)
+        elif cue.action == "reset":
+            self._reset_cue(target)
+        elif cue.action in ("arm", "disarm"):
+            target.armed = cue.action == "arm"
+            self._refresh_table()
         else:
             self.go_row(target_row, replace=True)
 
@@ -1672,6 +1693,9 @@ class MainWindow(QMainWindow):
 
         replace=True fades out whatever cue is already playing. replace=False lets it run on.
         """
+        if not self.show_model.cues[row].armed:
+            self._advance(row)  # disarmed cues are skipped, as QLab does on GO
+            return
         cues = self.show_model.cues
         if not 0 <= row < len(cues):
             return

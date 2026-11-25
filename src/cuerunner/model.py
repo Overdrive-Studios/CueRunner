@@ -49,6 +49,7 @@ class Cue:
     protocol: str = "artnet"  # light cues: "artnet" or "sacn"; network cues: "udp" or "tcp"
     group_mode: str = "all"  # group cues: "all" fires every child; "playlist" runs them one after another
     universe: int = 0  # light cues: the Art-Net universe
+    armed: bool = True  # disarmed cues are skipped by GO and cannot be started
     new_target: str = ""  # target cues: what the cue named in target now points at
     trigger_tc: str = ""  # HH:MM:SS:FF; fires when incoming timecode passes it (empty for none)
     fps: int = 30  # timecode cues: MIDI Timecode frame rate (24, 25 or 30)

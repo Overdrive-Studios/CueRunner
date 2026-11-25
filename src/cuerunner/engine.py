@@ -204,6 +204,14 @@ class Mixer:
         with self._lock:
             voice.fade(0.0, seconds, self.rate, stop_when_done=True)
 
+    def kill(self, tag) -> None:
+        """Stop every voice belonging to one cue immediately, with no fade (the Reset action)."""
+        with self._lock:
+            for voice in self._voices:
+                if voice.tag is tag:
+                    voice.done = True
+            self._voices = [v for v in self._voices if not v.done]
+
     def clear(self) -> None:
         """Stop every voice immediately, with no fade."""
         with self._lock:
