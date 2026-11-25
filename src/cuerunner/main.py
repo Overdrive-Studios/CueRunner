@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cuerunner import allenheath, artnet, console_ui, launcher, midi, osc, settings_ui, spotify, spotify_ui, updater, video_out
+from cuerunner import allenheath, artnet, console_ui, launcher, midi, netsend, osc, sacn, settings_ui, spotify, spotify_ui, updater, video_out
 from cuerunner.devices import DeviceInfo, label as devices_label
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
@@ -132,6 +132,7 @@ COLOURS = [
     ("Purple", "#7d3c98"),
 ]
 SPECIAL_KINDS = {
+    "network": "Network",
     "midi": "MIDI",
     "light": "Light",
     "osc": "OSC",
@@ -375,6 +376,16 @@ class CueDialog(QDialog):
             self.midi_port_box.setCurrentIndex(max(0, self.midi_port_box.findData(cue.target)))
             form.addRow("MIDI port", self.midi_port_box)
             form.addRow("Message", self.osc_message_edit)
+        if kind in ("light", "network"):
+            self.protocol_box = QComboBox()
+            options = [("Art-Net", "artnet"), ("sACN", "sacn")] if kind == "light" else [("UDP", "udp"), ("TCP", "tcp")]
+            for label, value in options:
+                self.protocol_box.addItem(label, value)
+            self.protocol_box.setCurrentIndex(max(0, self.protocol_box.findData(cue.protocol)))
+            form.addRow("Protocol", self.protocol_box)
+        if kind == "network":
+            form.addRow("Send to", self.osc_target_edit)
+            form.addRow("Message", self.osc_message_edit)
         if kind == "light":
             form.addRow("Node address", self.osc_target_edit)
             form.addRow("Universe", self.light_universe)
@@ -435,7 +446,9 @@ class CueDialog(QDialog):
         if cue.kind == "midi":
             cue.target = self.midi_port_box.currentData() or ""
             cue.text = self.osc_message_edit.text().strip()
-        if cue.kind in ("osc", "light"):
+        if cue.kind in ("light", "network"):
+            cue.protocol = self.protocol_box.currentData()
+        if cue.kind in ("osc", "light", "network"):
             cue.target = self.osc_target_edit.text().strip()
             cue.text = self.osc_message_edit.text().strip()
         if cue.kind == "light":
@@ -716,6 +729,8 @@ class MainWindow(QMainWindow):
             return f"{cue.text} to {cue.target}"
         if cue.kind == "midi":
             return f"{cue.text} to {cue.target or 'no port'}"
+        if cue.kind == "network":
+            return f"{cue.protocol.upper()} {cue.text} to {cue.target}"
         if cue.kind == "light":
             return f"Universe {cue.universe}: {cue.text} to {cue.target}"
         if cue.kind == "group":
@@ -1247,18 +1262,24 @@ class MainWindow(QMainWindow):
             self.go_row(next_child, replace=False)
         self._advance(row)
 
+    def _send_dmx(self, cue: Cue, levels: dict[int, int]) -> None:
+        if cue.protocol == "sacn":
+            sacn.send(cue.universe, levels, host=cue.target)
+        else:
+            artnet.send(cue.target, cue.universe, levels)
+
     def _run_light(self, cue: Cue) -> None:
         """Send a light cue's levels, ramping from the last levels sent to the same node and universe."""
         levels = artnet.parse_levels(cue.text)
-        key = (cue.target, cue.universe)
+        key = (cue.protocol, cue.target, cue.universe)
         start = self._dmx_last.get(key, {})
         if cue.seconds <= 0:
-            artnet.send(cue.target, cue.universe, levels)
+            self._send_dmx(cue, levels)
         else:
             steps = max(1, round(cue.seconds * 1000 / DMX_STEP_MS))
             for step in range(1, steps + 1):
                 frame = artnet.ramp_levels(start, levels, step / steps)
-                self._after(step * DMX_STEP_MS, lambda f=frame: artnet.send(cue.target, cue.universe, f))
+                self._after(step * DMX_STEP_MS, lambda f=frame: self._send_dmx(cue, f))
         self._dmx_last[key] = dict(levels)
 
     def _advance(self, row: int) -> None:
@@ -1421,6 +1442,13 @@ class MainWindow(QMainWindow):
             self.table.selectRow(min(row + 1, len(cues) - 1))
             return
         if cue.kind == "memo":
+            self._finish(row)
+            return
+        if cue.kind == "network":
+            try:
+                netsend.send(cue.protocol, cue.target, cue.text)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot send network cue", f"{cue.name}\n\n{exc}")
             self._finish(row)
             return
         if cue.kind == "midi":
