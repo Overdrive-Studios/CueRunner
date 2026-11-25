@@ -24,3 +24,10 @@ def test_video_cue_keeps_its_display_through_save_and_load(tmp_path: Path) -> No
     loaded = Show.load(path)
     assert loaded.cues[0].kind == "video"
     assert loaded.cues[0].video_output == "screen:1"
+
+
+def test_default_video_display_is_saved_with_the_show(tmp_path: Path) -> None:
+    show = Show(video_default_output="screen:2")
+    path = tmp_path / "show.cuerunner.json"
+    show.save(path)
+    assert Show.load(path).video_default_output == "screen:2"

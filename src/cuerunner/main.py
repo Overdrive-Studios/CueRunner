@@ -36,6 +36,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QMenu,
+    QSizePolicy,
+    QToolButton,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -177,7 +180,8 @@ class RoutingDialog(QDialog):
 class CueDialog(QDialog):
     """Edit a cue's name, fades, loop, follow/continue, hotkey and outputs."""
 
-    def __init__(self, cue: Cue, parent=None, out_channels: int = MAX_CHANNELS) -> None:
+    def __init__(self, cue: Cue, parent=None, out_channels: int = MAX_CHANNELS,
+                 video_choices: list[tuple[str, str]] | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Cue {cue.number}")
         self._out_channels = out_channels
@@ -196,8 +200,8 @@ class CueDialog(QDialog):
         self._route: list[list[int]] = [list(group) for group in cue.route]
         self._cue_kind = cue.kind
         self.display_box = QComboBox()
-        for i, label in enumerate(video_out.display_names()):
-            self.display_box.addItem(label, video_out.screen_output(i))
+        for label, value in video_choices or []:
+            self.display_box.addItem(label, value)
         current = max(0, self.display_box.findData(cue.video_output))
         self.display_box.setCurrentIndex(current)
         self.route_label = QLabel(self._route_summary())
@@ -219,7 +223,7 @@ class CueDialog(QDialog):
         outputs_row.addWidget(self.route_label, 1)
         outputs_row.addWidget(self.route_button)
         form.addRow("Outputs", outputs_row)
-        if self._cue_kind == "video":
+        if self._cue_kind in ("video", "camera"):
             form.addRow("Display", self.display_box)
         form.addRow(buttons)
 
@@ -254,7 +258,7 @@ class CueDialog(QDialog):
         cue.then = self.then_box.currentData()
         cue.hotkey = self.hotkey_edit.keySequence().toString()
         cue.route = [list(group) for group in self._route]
-        if cue.kind == "video" and self.display_box.count():
+        if cue.kind in ("video", "camera") and self.display_box.count():
             cue.video_output = self.display_box.currentData()
 
 
@@ -478,37 +482,60 @@ class MainWindow(QMainWindow):
     # --- UI setup -----------------------------------------------------
 
     def _build_toolbar(self) -> None:
+        """Top bar: file actions on the left, Pads and Settings on the right. Cue commands live in the Cues menu."""
         bar = QToolBar("File", self)
         bar.setMovable(False)
+        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.addToolBar(bar)
-        for label, handler in [
-            ("New", self.new_show),
-            ("Open...", self.open_show),
-            ("Save", self.save_show),
-        ]:
-            bar.addAction(label, handler)
+        bar.addAction("New", self.new_show)
+        bar.addAction("Open...", self.open_show)
+        bar.addAction("Save", self.save_show)
         bar.addSeparator()
-        for label, handler in [
-            ("Add Audio Cue...", self.add_audio_cue),
-            ("Add Video Cue...", self.add_video_cue),
-            ("Add Spotify Cue...", self.add_spotify_cue),
-            ("Add Console Cue...", self.add_console_cue),
-            ("Edit Cue...", self.edit_selected),
-            ("Remove Cue", self.remove_cue),
-        ]:
-            bar.addAction(label, handler)
-        bar.addSeparator()
-        bar.addAction("Settings...", self.open_settings)
+        add_button = QToolButton()
+        add_button.setText("Add Cue")
+        add_button.setToolTip("Add an audio, video, Spotify or console cue")
+        add_menu = QMenu(add_button)
+        add_menu.addAction("Audio Cue...", self.add_audio_cue)
+        add_menu.addAction("Video Cue...", self.add_video_cue)
+        add_menu.addAction("Camera Cue...", self.add_camera_cue)
+        add_menu.addAction("Spotify Cue...", self.add_spotify_cue)
+        add_menu.addAction("Console Cue...", self.add_console_cue)
+        add_button.setMenu(add_menu)
+        add_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        add_button.setStyleSheet("QToolButton { padding: 4px 10px; }")
+        bar.addWidget(add_button)
         bar.addSeparator()
         self.pads_action = bar.addAction("Pads")
         self.pads_action.setCheckable(True)
         self.pads_action.setChecked(True)
+        self.pads_action.setToolTip("Show or hide the soundboard pads")
         self.pads_action.toggled.connect(self._toggle_pads)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        bar.addWidget(spacer)
+        settings_action = bar.addAction("Settings...", self.open_settings)
+        settings_action.setToolTip("Audio, video, console and other settings")
+
+    def _camera_for(self, cue: Cue) -> str:
+        """The camera name for a camera cue, looked up from its video input patch."""
+        for patch in self.show_model.video_inputs:
+            if patch.get("name") == cue.video_input:
+                return str(patch.get("device", ""))
+        raise RuntimeError(f"The video input \"{cue.video_input}\" no longer exists.")
 
     def _toggle_pads(self, shown: bool) -> None:
         self.soundboard.setVisible(shown)
 
     def _build_menus(self) -> None:
+        cues_menu = self.menuBar().addMenu("Cues")
+        cues_menu.addAction("Add Audio Cue...", self.add_audio_cue)
+        cues_menu.addAction("Add Video Cue...", self.add_video_cue)
+        cues_menu.addAction("Add Camera Cue...", self.add_camera_cue)
+        cues_menu.addAction("Add Spotify Cue...", self.add_spotify_cue)
+        cues_menu.addAction("Add Console Cue...", self.add_console_cue)
+        cues_menu.addSeparator()
+        cues_menu.addAction("Edit Cue...", self.edit_selected)
+        cues_menu.addAction("Remove Cue", self.remove_cue)
         audio_menu = self.menuBar().addMenu("Audio")
         audio_menu.addAction("Output Device...", self.choose_output)
         audio_menu.addAction("Choose Mic Input...", self.choose_mic)
@@ -877,13 +904,32 @@ class MainWindow(QMainWindow):
         filenames, _ = QFileDialog.getOpenFileNames(self, "Add video cues", "", VIDEO_FILTER)
         if not filenames:
             return
-        default_output = video_out.screen_output(0) if QGuiApplication.screens() else ""
+        default_output = self.show_model.video_default_output if QGuiApplication.screens() else ""
         for filename in filenames:
             path = Path(filename)
             self.show_model.cues.append(Cue(
                 number=self.show_model.next_number(), name=path.stem, kind="video",
                 file=str(path), video_output=default_output,
             ))
+        self._refresh_table()
+
+    def add_camera_cue(self) -> None:
+        patches = self.show_model.video_inputs
+        if not patches:
+            QMessageBox.information(
+                self, "No video inputs",
+                "Add a video input first in Settings > Video > Video Inputs.",
+            )
+            return
+        names = [str(p.get("name", "")) for p in patches]
+        name, ok = QInputDialog.getItem(self, "Add camera cue", "Video input:", names, 0, False)
+        if not ok or not name:
+            return
+        default_output = self.show_model.video_default_output if QGuiApplication.screens() else ""
+        self.show_model.cues.append(Cue(
+            number=self.show_model.next_number(), name=name, kind="camera",
+            video_input=name, video_output=default_output,
+        ))
         self._refresh_table()
 
     def _probe_duration(self, cue: Cue) -> None:
@@ -898,7 +944,10 @@ class MainWindow(QMainWindow):
         if not 0 <= row < len(self.show_model.cues):
             return
         cue = self.show_model.cues[row]
-        dialog = CueDialog(cue, self, self.mixer.out_channels if self.mixer is not None else MAX_CHANNELS)
+        dialog = CueDialog(
+            cue, self, self.mixer.out_channels if self.mixer is not None else MAX_CHANNELS,
+            video_choices=video_out.output_choices(self.show_model.video_routes),
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             dialog.apply_to(cue)
             self._refresh_table()
@@ -947,9 +996,16 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\nThis video cue has no file.")
             else:
                 try:
-                    self._video.play(cue.video_output, cue.file)
+                    self._video.play(cue.video_output, cue.file, self.show_model.video_routes)
                 except Exception as exc:
                     QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
+            self.table.selectRow(min(row + 1, len(cues) - 1))
+            return
+        if cue.kind == "camera":
+            try:
+                self._video.show_camera(cue.video_output, self._camera_for(cue), self.show_model.video_routes)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
             self.table.selectRow(min(row + 1, len(cues) - 1))
             return
         if self.mixer is None:

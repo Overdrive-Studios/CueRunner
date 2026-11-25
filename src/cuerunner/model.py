@@ -28,7 +28,7 @@ DEFAULT_REMOTE_PORT = 8080
 class Cue:
     number: str
     name: str
-    kind: str = "audio"  # audio, video, console, spotify, wait, memo
+    kind: str = "audio"  # audio, video, camera, console, spotify, wait, memo
     file: str = ""
     fade_in: float = 0.0  # seconds
     fade_out: float = 0.0
@@ -37,7 +37,8 @@ class Cue:
     loop: bool = False
     then: str = "none"  # "none", "follow" (start next when this ends), or "continue" (start next now)
     route: list = field(default_factory=list)  # per clip channel, the 1-based outputs it goes to; empty = default
-    video_output: str = ""  # video cues: the display, e.g. "screen:1"; see video_out.py
+    video_output: str = ""  # video and camera cues: a display ("screen:1") or route ("route:Stage"); see video_out.py
+    video_input: str = ""  # camera cues: the name of a video input patch
 
 
 @dataclass
@@ -102,6 +103,9 @@ class Show:
     spotify_client_id: str = ""  # from the Spotify developer app; not a secret when using PKCE
     console_host: str = ""  # Allen & Heath console IP address
     console_family: str = "sq"  # "sq" or "dlive"
+    video_default_output: str = "screen:0"  # display or route used for new video cues, e.g. "screen:1"
+    video_routes: list = field(default_factory=list)  # [{"name", "output" (a display), "fit" ("full" or "fit")}]
+    video_inputs: list = field(default_factory=list)  # [{"name", "device" (a camera's name)}]
 
     def next_number(self) -> str:
         numbers = []
@@ -142,6 +146,9 @@ class Show:
             "spotify_client_id": self.spotify_client_id,
             "console_host": self.console_host,
             "console_family": self.console_family,
+            "video_default_output": self.video_default_output,
+            "video_routes": [dict(r) for r in self.video_routes],
+            "video_inputs": [dict(p) for p in self.video_inputs],
         }
         return json.dumps(data, indent=2)
 
@@ -168,4 +175,7 @@ class Show:
             spotify_client_id=str(data.get("spotify_client_id", "")),
             console_host=str(data.get("console_host", "")),
             console_family=str(data.get("console_family", "sq")),
+            video_default_output=str(data.get("video_default_output", "screen:0")),
+            video_routes=[dict(r) for r in data.get("video_routes", []) if isinstance(r, dict)],
+            video_inputs=[dict(p) for p in data.get("video_inputs", []) if isinstance(p, dict)],
         )
