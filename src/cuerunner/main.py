@@ -684,6 +684,7 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_menus()
         self._build_central()
+        self.setAcceptDrops(True)  # drop audio, video or MIDI files onto the window to add cues
 
         go_key = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         go_key.activated.connect(self.go)
@@ -1428,6 +1429,45 @@ class MainWindow(QMainWindow):
         if self._spotify_playing:
             self._spotify_playing = False
             spotify_ui.send(self, self._spotify_client(), "Spotify pause", lambda c: c.pause())
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """Dropped files become cues after the selected row (or at the end), by file type."""
+        from cuerunner.dropped import split_drop
+
+        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+        accepted, skipped = split_drop(paths)
+        if accepted:
+            self._add_dropped_files(accepted)
+        if skipped:
+            QMessageBox.information(
+                self, "Not added",
+                "These files are not audio, video or MIDI files, so they were not added:\n\n" + "\n".join(skipped),
+            )
+        event.acceptProposedAction()
+
+    def _add_dropped_files(self, accepted: list[tuple[str, str]]) -> None:
+        """Insert one cue per file. Audio is probed for its length afterwards, as the Add Audio Cues command does."""
+        insert_at = self.table.currentRow() + 1 if self.table.currentRow() >= 0 else len(self.show_model.cues)
+        default_output = self.show_model.video_default_output if QGuiApplication.screens() else ""
+        new_cues: list[Cue] = []
+        for path_text, kind in accepted:
+            path = Path(path_text)
+            cue = Cue(number=self.show_model.next_number(), name=path.stem, kind=kind, file=str(path))
+            if kind == "video":
+                cue.video_output = default_output
+            self.show_model.cues.insert(insert_at, cue)
+            new_cues.append(cue)
+            insert_at += 1
+        for cue in new_cues:
+            if cue.kind == "audio":
+                self._probe_duration(cue)
+        self._refresh_table()
 
     def add_audio_cue(self) -> None:
         filenames, _ = QFileDialog.getOpenFileNames(self, "Add audio cues", "", AUDIO_FILTER)
