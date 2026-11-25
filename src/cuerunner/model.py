@@ -56,6 +56,7 @@ class Cue:
     new_target: str = ""  # target cues: what the cue named in target now points at
     trigger_tc: str = ""  # HH:MM:SS:FF; fires when incoming timecode passes it (empty for none)
     fps: int = 30  # timecode cues: MIDI Timecode frame rate (24, 25 or 30)
+    notes: str = ""  # free text shown in the inspector's Notes box
     colour: str = ""  # a hex colour shown on the cue's row, e.g. "#2980b9"; empty for none
     pre_wait_ms: int = 0  # wait this long after GO before the cue starts
     post_wait_ms: int = 0  # follow cues: wait this long after the cue ends before the next one starts

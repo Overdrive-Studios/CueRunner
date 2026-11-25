@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QGridLayout,
+    QTabBar,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -75,6 +77,20 @@ from cuerunner.version import __version__
 
 BACKUP_INTERVAL_MS = 15 * 60 * 1000  # automatic show snapshot every 15 minutes
 DMX_STEP_MS = 40  # light ramps send a new frame this often
+INSPECTOR_TABS = ["Basics", "Triggers", "I/O", "Time & Loops", "Levels", "Objects", "Trim", "Audio FX"]
+CONTINUE_MODES = [("Do not continue", "none"), ("Auto-follow", "follow"), ("Auto-continue", "continue")]
+
+
+def _format_duration(ms: int) -> str:
+    """HH:MM:SS.mmm, as QLab shows durations."""
+    if ms <= 0:
+        return "00:00:00.000"
+    hours, rest = divmod(ms, 3_600_000)
+    minutes, rest = divmod(rest, 60_000)
+    seconds, millis = divmod(rest, 1000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+
+
 MAIN_QSS = """
 QWidget#mainWindow { background: #3b3b3f; }
 QPushButton#bigGo {
@@ -821,7 +837,7 @@ class MainWindow(QMainWindow):
         """No toolbar: the cue buttons sit above the cue list, as in QLab. File actions are in the File menu."""
 
     def _refresh_inspector(self) -> None:
-        if not hasattr(self, "inspector_label"):
+        if not hasattr(self, "insp_name"):
             return
         row = self._selected_row()
         cues = self.show_model.cues
@@ -829,40 +845,33 @@ class MainWindow(QMainWindow):
         editable = has_cue and self._editing
         self._insp_busy = True
         try:
-            for widget in (self.insp_name, self.insp_pre, self.insp_post,
-                           self.insp_colour, self.insp_hotkey):
+            for widget in (self.insp_name, self.insp_pre, self.insp_post, self.insp_continue,
+                           self.insp_colour, self.insp_hotkey, self.insp_notes, self.insp_armed):
                 widget.setEnabled(editable)
-            self.insp_full_edit.setEnabled(editable)
+            self.insp_full_edit.setEnabled(has_cue)
             if not has_cue:
-                self.insp_name.clear()
-            else:
-                cue = cues[row]
-                self.insp_name.setText(cue.name)
-                self.insp_pre.setValue(cue.pre_wait_ms / 1000)
-                self.insp_post.setValue(cue.post_wait_ms / 1000)
-                index = self.insp_colour.findData(cue.colour or "")
-                self.insp_colour.setCurrentIndex(max(index, 0))
-                self.insp_hotkey.setKeySequence(QKeySequence(cue.hotkey))
+                for widget in (self.insp_number, self.insp_duration, self.insp_target,
+                               self.insp_name):
+                    widget.clear()
+                self.insp_notes.clear()
+                self.insp_armed.setChecked(False)
+                return
+            cue = cues[row]
+            self.insp_number.setText(cue.number)
+            self.insp_duration.setText(_format_duration(cue.duration_ms))
+            self.insp_target.setText(self._target_text(cue))
+            self.insp_name.setText(cue.name)
+            self.insp_pre.setValue(cue.pre_wait_ms / 1000)
+            self.insp_post.setValue(cue.post_wait_ms / 1000)
+            index = self.insp_continue.findData(cue.then)
+            self.insp_continue.setCurrentIndex(max(index, 0))
+            index = self.insp_colour.findData(cue.colour or "")
+            self.insp_colour.setCurrentIndex(max(index, 0))
+            self.insp_hotkey.setKeySequence(QKeySequence(cue.hotkey))
+            self.insp_notes.setPlainText(cue.notes)
+            self.insp_armed.setChecked(cue.armed)
         finally:
             self._insp_busy = False
-        if not has_cue:
-            self.inspector_label.setText("No cue selected")
-            return
-        cue = cues[row]
-        parts = [
-            f"Cue {cue.number}: {cue.name}",
-            cue.kind.title(),
-            self._target_text(cue),
-            f"Pre-wait {cue.pre_wait_ms / 1000:g} s",
-            f"Post-wait {cue.post_wait_ms / 1000:g} s",
-        ]
-        if cue.kind == "audio" or cue.kind == "video":
-            parts.append(f"Fade in {cue.fade_in:g} s, out {cue.fade_out:g} s")
-        if cue.hotkey:
-            parts.append(f"Hotkey {cue.hotkey}")
-        if cue.parent:
-            parts.append(f"In group {cue.parent}")
-        self.inspector_label.setText("  •  ".join(part for part in parts if part))
 
     def _inspector_apply(self) -> None:
         """Write the inspector fields back to the selected cue (Edit mode only)."""
@@ -878,8 +887,11 @@ class MainWindow(QMainWindow):
             cue.name = name
         cue.pre_wait_ms = int(self.insp_pre.value() * 1000)
         cue.post_wait_ms = int(self.insp_post.value() * 1000)
+        cue.then = self.insp_continue.currentData() or "none"
         cue.colour = self.insp_colour.currentData() or ""
         cue.hotkey = self.insp_hotkey.keySequence().toString()
+        cue.notes = self.insp_notes.toPlainText()
+        cue.armed = self.insp_armed.isChecked()
         self._refresh_table()
         self._rebuild_shortcuts()
         self.table.selectRow(row)
@@ -1104,44 +1116,87 @@ class MainWindow(QMainWindow):
         self.table.itemSelectionChanged.connect(self._refresh_inspector)
         layout.addWidget(self.table, 1)
 
-        self.inspector_label = QLabel("No cue selected")
-        self.inspector_label.setObjectName("inspector")
-        self.inspector_label.setWordWrap(True)
-        layout.addWidget(self.inspector_label)
-
-        # Editable fields for the selected cue. They apply straight away in Edit mode;
-        # Full Edit opens the complete cue dialog for everything else.
+        # QLab-style inspector: a tab row, and the Basics form for the selected cue.
+        # Fields apply straight away in Edit mode; Full Edit opens the complete cue dialog.
         self._insp_busy = False
         self.inspector_bar = QFrame()
         self.inspector_bar.setObjectName("inspectorBar")
-        bar = QHBoxLayout(self.inspector_bar)
-        bar.setContentsMargins(8, 4, 8, 4)
-        self.insp_name = QLineEdit()
-        self.insp_name.setMinimumWidth(160)
+        outer = QVBoxLayout(self.inspector_bar)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.insp_tabs = QTabBar()
+        self.insp_tabs.setObjectName("inspectorTabs")
+        self.insp_tabs.setExpanding(False)
+        for title in INSPECTOR_TABS:
+            index = self.insp_tabs.addTab(title)
+            if title != "Basics":
+                self.insp_tabs.setTabEnabled(index, False)
+                self.insp_tabs.setTabToolTip(index, "Coming in a later update")
+        self.insp_tabs.setCurrentIndex(0)
+        outer.addWidget(self.insp_tabs)
+
+        page = QFrame()
+        page.setObjectName("inspectorPage")
+        grid = QGridLayout(page)
+        grid.setContentsMargins(12, 10, 12, 10)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+
+        self.insp_number = QLineEdit()
+        self.insp_number.setReadOnly(True)
+        self.insp_duration = QLineEdit()
+        self.insp_duration.setReadOnly(True)
         self.insp_pre = QDoubleSpinBox()
         self.insp_post = QDoubleSpinBox()
         for spin in (self.insp_pre, self.insp_post):
             spin.setRange(0, 3600)
-            spin.setDecimals(1)
+            spin.setDecimals(3)
             spin.setSuffix(" s")
-            spin.setMaximumWidth(100)
+            spin.setMaximumWidth(140)
+        self.insp_continue = QComboBox()
+        for label, value in CONTINUE_MODES:
+            self.insp_continue.addItem(label, value)
+
+        self.insp_name = QLineEdit()
+        self.insp_name.setMinimumWidth(180)
+        self.insp_target = QLineEdit()
+        self.insp_target.setReadOnly(True)
+        self.insp_notes = QPlainTextEdit()
+        self.insp_notes.setMinimumHeight(60)
         self.insp_colour = QComboBox()
         for label, value in COLOURS:
             self.insp_colour.addItem(label, value)
         self.insp_hotkey = QKeySequenceEdit()
         self.insp_hotkey.setMaximumWidth(160)
+        self.insp_armed = QCheckBox("Armed")
         self.insp_full_edit = QPushButton("Full Edit…")
-        for caption, widget in [("Name", self.insp_name), ("Pre-wait", self.insp_pre),
-                                ("Post-wait", self.insp_post), ("Colour", self.insp_colour),
-                                ("Hotkey", self.insp_hotkey)]:
-            bar.addWidget(QLabel(caption))
-            bar.addWidget(widget, 1 if widget is self.insp_name else 0)
-        bar.addWidget(self.insp_full_edit)
+
+        left = [("Number:", self.insp_number), ("Duration:", self.insp_duration),
+                ("Pre-Wait:", self.insp_pre), ("Post-Wait:", self.insp_post),
+                ("Continue:", self.insp_continue)]
+        for row, (caption, widget) in enumerate(left):
+            grid.addWidget(QLabel(caption), row, 0)
+            grid.addWidget(widget, row, 1)
+        right = [("Name:", self.insp_name), ("Target:", self.insp_target),
+                 ("Colour:", self.insp_colour), ("Hotkey:", self.insp_hotkey)]
+        for row, (caption, widget) in enumerate(right):
+            grid.addWidget(QLabel(caption), row, 2)
+            grid.addWidget(widget, row, 3)
+        grid.addWidget(QLabel("Notes:"), len(right), 2, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(self.insp_notes, len(right), 3)
+        grid.addWidget(self.insp_armed, len(left), 0, 1, 2)
+        grid.addWidget(self.insp_full_edit, len(left), 3, Qt.AlignmentFlag.AlignRight)
+        grid.setColumnStretch(3, 1)
+        outer.addWidget(page)
+
         self.insp_name.editingFinished.connect(self._inspector_apply)
         self.insp_pre.valueChanged.connect(self._inspector_apply)
         self.insp_post.valueChanged.connect(self._inspector_apply)
+        self.insp_continue.currentIndexChanged.connect(self._inspector_apply)
         self.insp_colour.currentIndexChanged.connect(self._inspector_apply)
         self.insp_hotkey.keySequenceChanged.connect(self._inspector_apply)
+        self.insp_notes.textChanged.connect(self._inspector_apply)
+        self.insp_armed.toggled.connect(self._inspector_apply)
         self.insp_full_edit.clicked.connect(self.edit_selected)
         layout.addWidget(self.inspector_bar)
 

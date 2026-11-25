@@ -193,11 +193,11 @@ def test_inspector_describes_the_selected_cue(window):
                                       pre_wait_ms=500, hotkey="F4"))
     window._refresh_table()
     window.table.selectRow(0)
-    text = window.inspector_label.text()
-    assert "Cue 4: Opening" in text
-    assert "Fade cue 3 to 0% over 2 s" in text
-    assert "Pre-wait 0.5 s" in text
-    assert "Hotkey F4" in text
+    assert window.insp_number.text() == "4"
+    assert window.insp_name.text() == "Opening"
+    assert window.insp_target.text() == "Fade cue 3 to 0% over 2 s"
+    assert window.insp_pre.value() == pytest.approx(0.5)
+    assert window.insp_hotkey.keySequence().toString() == "F4"
 
 
 def test_load_then_start_resumes_the_same_voice(window, tmp_path):

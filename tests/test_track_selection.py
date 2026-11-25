@@ -58,3 +58,28 @@ def test_clicks_inside_the_inspector_keep_the_selection(window):
 def test_playhead_starts_at_the_first_cue_before_anything_is_clicked(window):
     _three_cues(window)
     assert window._playhead_row() == 0
+
+
+def test_inspector_shows_the_basics_tab_for_the_selected_cue(window):
+    from cuerunner.model import Cue
+
+    window.show_model.cues.append(Cue(number="7", name="Song", kind="audio", duration_ms=203_500,
+                                      then="follow", notes="Fade out early"))
+    window._refresh_table()
+    window.table.selectRow(0)
+    assert window.insp_tabs.tabText(0) == "Basics"
+    assert window.insp_duration.text() == "00:03:23.500"
+    assert window.insp_continue.currentData() == "follow"
+    assert window.insp_notes.toPlainText() == "Fade out early"
+    assert window.insp_number.isReadOnly()
+
+
+def test_editing_the_notes_writes_them_back(window):
+    from cuerunner.model import Cue
+
+    window.show_model.cues.append(Cue(number="1", name="Song", kind="memo"))
+    window._refresh_table()
+    window.table.selectRow(0)
+    window._set_mode(editing=True)
+    window.insp_notes.setPlainText("Check levels")
+    assert window.show_model.cues[0].notes == "Check levels"
