@@ -6,6 +6,8 @@ they can overlap, and the mixer is fed to the sound card by audio_io.
 
 from __future__ import annotations
 
+import shlex
+import subprocess
 import sys
 import tempfile
 from datetime import datetime
@@ -142,6 +144,7 @@ SPECIAL_KINDS = {
     "fade": "Fade",
     "devamp": "Devamp",
     "target": "Target",
+    "program": "Run Program",
     "control": "Control",
     "wait": "Wait",
     "group": "Group",
@@ -366,6 +369,18 @@ class CueDialog(QDialog):
             form.addRow("Action", self.action_box)
         if kind == "devamp":
             form.addRow("Loop cue", self.target_edit)
+        if kind == "program":
+            self.program_edit = QLineEdit(cue.file)
+            self.program_edit.setPlaceholderText("Path to the program, e.g. /usr/bin/say")
+            browse = QPushButton("Browse…")
+            browse.clicked.connect(self._browse_program)
+            row_box = QHBoxLayout()
+            row_box.addWidget(self.program_edit, 1)
+            row_box.addWidget(browse)
+            self.program_args_edit = QLineEdit(cue.text)
+            self.program_args_edit.setPlaceholderText("Arguments, separated by spaces")
+            form.addRow("Program", row_box)
+            form.addRow("Arguments", self.program_args_edit)
         if kind == "target":
             self.new_target_edit = QLineEdit(cue.new_target)
             self.new_target_edit.setPlaceholderText("Cue number, or a file path for audio and video")
@@ -451,6 +466,11 @@ class CueDialog(QDialog):
         spin.setValue(value)
         return spin
 
+    def _browse_program(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(self, "Choose a program", "")
+        if filename:
+            self.program_edit.setText(filename)
+
     def _accept_checked(self) -> None:
         """OK, but only when the timecode trigger is blank or a valid HH:MM:SS:FF."""
         text = self.trigger_tc_edit.text().strip() if hasattr(self, "trigger_tc_edit") else ""
@@ -481,6 +501,9 @@ class CueDialog(QDialog):
             cue.target = self.target_edit.text().strip()
         if cue.kind == "target":
             cue.new_target = self.new_target_edit.text().strip()
+        if cue.kind == "program":
+            cue.file = self.program_edit.text().strip()
+            cue.text = self.program_args_edit.text().strip()
         if cue.kind == "midi":
             cue.target = self.midi_port_box.currentData() or ""
             cue.text = self.osc_message_edit.text().strip()
@@ -810,6 +833,8 @@ class MainWindow(QMainWindow):
             return f"{cue.action.title()} cue {cue.target}"
         if cue.kind == "devamp":
             return f"Ends the loop on cue {cue.target}"
+        if cue.kind == "program":
+            return f"Runs {cue.file or 'no program'} {cue.text}".rstrip()
         if cue.kind == "target":
             return f"Cue {cue.target} now targets {cue.new_target or 'nothing'}"
         if cue.kind == "fade":
@@ -1501,6 +1526,14 @@ class MainWindow(QMainWindow):
             if not voice.done and voice.tag is target:
                 voice.paused = paused
 
+    def _run_program(self, cue: Cue) -> None:
+        """Start a program with the arguments typed on the cue. No shell is used, so nothing is interpreted."""
+        program = cue.file.strip()
+        if not program:
+            raise ValueError("Choose a program for this cue.")
+        arguments = shlex.split(cue.text)
+        subprocess.Popen([program, *arguments], stdin=subprocess.DEVNULL)
+
     def _retarget_cue(self, cue: Cue) -> None:
         """Point the named cue at a new target: a cue number for control, fade and devamp cues, a file for audio and video."""
         number = cue.target.strip()
@@ -1749,6 +1782,13 @@ class MainWindow(QMainWindow):
             return
         if cue.kind == "devamp":
             self._devamp_cue(cue)
+            self._finish(row)
+            return
+        if cue.kind == "program":
+            try:
+                self._run_program(cue)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot run program", f"{cue.name}\n\n{exc}")
             self._finish(row)
             return
         if cue.kind == "target":
