@@ -579,7 +579,7 @@ class MainWindow(QMainWindow):
         if not ok:
             return
         try:
-            allenheath.parse_sq_command(text)
+            allenheath.parse_command(self.show_model.console_family, text)
         except ValueError as exc:
             QMessageBox.warning(self, "Add console cue", str(exc))
             return
@@ -588,17 +588,22 @@ class MainWindow(QMainWindow):
         self._refresh_table()
 
     def open_console(self) -> None:
-        dialog = console_ui.ConsoleDialog(self.show_model.console_host, self._console_for, self)
+        dialog = console_ui.ConsoleDialog(
+            self.show_model.console_host, self.show_model.console_family, self._console_for, self
+        )
         dialog.exec()
         self.show_model.console_host = dialog.host.text().strip()
+        self.show_model.console_family = dialog.current_family()
 
-    def _console_for(self, host: str) -> allenheath.MidiTcpSender | None:
+    def _console_for(self, host: str, family: str | None = None) -> allenheath.MidiTcpSender | None:
         if not host:
             return None
-        if self._console is None or self._console._host != host:
+        family = family or self.show_model.console_family
+        port = allenheath.port_for(family)
+        if self._console is None or self._console._host != host or self._console._port != port:
             if self._console is not None:
                 self._console.close()
-            self._console = allenheath.MidiTcpSender(host, allenheath.SQ_PORT)
+            self._console = allenheath.MidiTcpSender(host, port)
         return self._console
 
     def _send_console_cue(self, cue: Cue) -> None:
@@ -607,7 +612,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Console cue", "Set the console's IP address under Audio → Allen & Heath Console first.")
             return
         try:
-            data = allenheath.parse_sq_command(cue.file, channel=1)
+            data = allenheath.parse_command(self.show_model.console_family, cue.file, channel=1)
         except ValueError as exc:
             QMessageBox.warning(self, "Console cue", f"{cue.name}\n\n{exc}")
             return

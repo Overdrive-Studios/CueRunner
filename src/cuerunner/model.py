@@ -64,6 +64,7 @@ class Show:
     remote_port: int = DEFAULT_REMOTE_PORT
     spotify_client_id: str = ""  # from the Spotify developer app; not a secret when using PKCE
     console_host: str = ""  # Allen & Heath console IP address
+    console_family: str = "sq"  # "sq" or "dlive"
 
     def next_number(self) -> str:
         numbers = []
@@ -86,6 +87,7 @@ class Show:
             "remote_port": self.remote_port,
             "spotify_client_id": self.spotify_client_id,
             "console_host": self.console_host,
+            "console_family": self.console_family,
         }
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -111,4 +113,5 @@ class Show:
             remote_port=int(data.get("remote_port", DEFAULT_REMOTE_PORT)),
             spotify_client_id=str(data.get("spotify_client_id", "")),
             console_host=str(data.get("console_host", "")),
+            console_family=str(data.get("console_family", "sq")),
         )
