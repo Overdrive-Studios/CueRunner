@@ -83,3 +83,40 @@ def test_editing_the_notes_writes_them_back(window):
     window._set_mode(editing=True)
     window.insp_notes.setPlainText("Check levels")
     assert window.show_model.cues[0].notes == "Check levels"
+
+
+def test_tab_pages_line_up_with_the_tab_row(window):
+    from cuerunner.main import INSPECTOR_TABS
+
+    assert window.insp_stack.count() == len(INSPECTOR_TABS)
+    assert [window.insp_tabs.tabText(i) for i in range(len(INSPECTOR_TABS))] == INSPECTOR_TABS
+    window.insp_tabs.setCurrentIndex(3)  # Time & Loops
+    assert window.insp_stack.currentIndex() == 3
+
+
+def test_loop_and_timecode_trigger_write_back(window):
+    from cuerunner.model import Cue
+
+    window.show_model.cues.append(Cue(number="1", name="Song", kind="audio"))
+    window._refresh_table()
+    window.table.selectRow(0)
+    window._set_mode(editing=True)
+    window.insp_loop.setChecked(True)
+    window.insp_loop_out.setValue(12.5)
+    window.insp_trigger_tc.setText("00:01:30:00")
+    window.insp_trigger_tc.editingFinished.emit()
+    cue = window.show_model.cues[0]
+    assert cue.loop is True and cue.loop_out == pytest.approx(12.5)
+    assert cue.trigger_tc == "00:01:30:00"
+
+
+def test_invalid_timecode_trigger_is_not_saved(window):
+    from cuerunner.model import Cue
+
+    window.show_model.cues.append(Cue(number="1", name="Song", kind="audio", trigger_tc="00:00:10:00"))
+    window._refresh_table()
+    window.table.selectRow(0)
+    window._set_mode(editing=True)
+    window.insp_trigger_tc.setText("not a time")
+    window.insp_trigger_tc.editingFinished.emit()
+    assert window.show_model.cues[0].trigger_tc == "00:00:10:00"

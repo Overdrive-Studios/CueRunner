@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QGridLayout,
+    QStackedWidget,
     QTabBar,
     QComboBox,
     QDialog,
@@ -78,6 +79,7 @@ from cuerunner.version import __version__
 BACKUP_INTERVAL_MS = 15 * 60 * 1000  # automatic show snapshot every 15 minutes
 DMX_STEP_MS = 40  # light ramps send a new frame this often
 INSPECTOR_TABS = ["Basics", "Triggers", "I/O", "Time & Loops", "Levels", "Objects", "Trim", "Audio FX"]
+IMPLEMENTED_TABS = {"Basics", "Time & Loops", "Triggers"}
 CONTINUE_MODES = [("Do not continue", "none"), ("Auto-follow", "follow"), ("Auto-continue", "continue")]
 
 
@@ -846,7 +848,9 @@ class MainWindow(QMainWindow):
         self._insp_busy = True
         try:
             for widget in (self.insp_name, self.insp_pre, self.insp_post, self.insp_continue,
-                           self.insp_colour, self.insp_hotkey, self.insp_notes, self.insp_armed):
+                           self.insp_colour, self.insp_hotkey, self.insp_notes, self.insp_armed,
+                           self.insp_loop, self.insp_loop_in, self.insp_loop_out,
+                           self.insp_trigger_tc):
                 widget.setEnabled(editable)
             self.insp_full_edit.setEnabled(has_cue)
             if not has_cue:
@@ -855,6 +859,8 @@ class MainWindow(QMainWindow):
                     widget.clear()
                 self.insp_notes.clear()
                 self.insp_armed.setChecked(False)
+                self.insp_loop.setChecked(False)
+                self.insp_trigger_tc.clear()
                 return
             cue = cues[row]
             self.insp_number.setText(cue.number)
@@ -870,6 +876,10 @@ class MainWindow(QMainWindow):
             self.insp_hotkey.setKeySequence(QKeySequence(cue.hotkey))
             self.insp_notes.setPlainText(cue.notes)
             self.insp_armed.setChecked(cue.armed)
+            self.insp_loop.setChecked(cue.loop)
+            self.insp_loop_in.setValue(cue.loop_in)
+            self.insp_loop_out.setValue(cue.loop_out)
+            self.insp_trigger_tc.setText(cue.trigger_tc)
         finally:
             self._insp_busy = False
 
@@ -882,6 +892,18 @@ class MainWindow(QMainWindow):
         if not 0 <= row < len(cues):
             return
         cue = cues[row]
+        trigger = self.insp_trigger_tc.text().strip()
+        if trigger:
+            try:
+                mtc.parse_timecode(trigger, 24)
+            except ValueError:
+                self.insp_trigger_tc.setStyleSheet("border: 1px solid #c0392b;")
+                return  # keep the last valid trigger until the text is fixed
+        self.insp_trigger_tc.setStyleSheet("")
+        cue.trigger_tc = trigger
+        cue.loop = self.insp_loop.isChecked()
+        cue.loop_in = self.insp_loop_in.value()
+        cue.loop_out = self.insp_loop_out.value()
         name = self.insp_name.text().strip()
         if name:
             cue.name = name
@@ -1129,7 +1151,7 @@ class MainWindow(QMainWindow):
         self.insp_tabs.setExpanding(False)
         for title in INSPECTOR_TABS:
             index = self.insp_tabs.addTab(title)
-            if title != "Basics":
+            if title not in IMPLEMENTED_TABS:
                 self.insp_tabs.setTabEnabled(index, False)
                 self.insp_tabs.setTabToolTip(index, "Coming in a later update")
         self.insp_tabs.setCurrentIndex(0)
@@ -1187,8 +1209,64 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.insp_armed, len(left), 0, 1, 2)
         grid.addWidget(self.insp_full_edit, len(left), 3, Qt.AlignmentFlag.AlignRight)
         grid.setColumnStretch(3, 1)
-        outer.addWidget(page)
+        # One page per tab, in tab order, so the stack index matches the tab index.
+        self.insp_stack = QStackedWidget()
+        built_pages = {"Basics": page}
 
+        # Triggers: the timecode that fires this cue.
+        triggers_page = QFrame()
+        triggers_page.setObjectName("inspectorPage")
+        tgrid = QGridLayout(triggers_page)
+        tgrid.setContentsMargins(12, 10, 12, 10)
+        self.insp_trigger_tc = QLineEdit()
+        self.insp_trigger_tc.setPlaceholderText("HH:MM:SS:FF, blank for none")
+        self.insp_trigger_tc.setMaximumWidth(200)
+        tgrid.addWidget(QLabel("Timecode:"), 0, 0)
+        tgrid.addWidget(self.insp_trigger_tc, 0, 1)
+        tgrid.addWidget(QLabel("Fires when incoming timecode reaches this time."), 1, 1)
+        tgrid.setRowStretch(2, 1)
+        built_pages["Triggers"] = triggers_page
+
+        # Time & Loops: looping and the loop points.
+        time_page = QFrame()
+        time_page.setObjectName("inspectorPage")
+        ggrid = QGridLayout(time_page)
+        ggrid.setContentsMargins(12, 10, 12, 10)
+        self.insp_loop = QCheckBox("Loop until stopped")
+        self.insp_loop_in = QDoubleSpinBox()
+        self.insp_loop_out = QDoubleSpinBox()
+        for spin in (self.insp_loop_in, self.insp_loop_out):
+            spin.setRange(0, 86400)
+            spin.setDecimals(3)
+            spin.setSuffix(" s")
+            spin.setMaximumWidth(140)
+        ggrid.addWidget(self.insp_loop, 0, 0, 1, 2)
+        ggrid.addWidget(QLabel("Loop in:"), 1, 0)
+        ggrid.addWidget(self.insp_loop_in, 1, 1)
+        ggrid.addWidget(QLabel("Loop out:"), 2, 0)
+        ggrid.addWidget(self.insp_loop_out, 2, 1)
+        ggrid.addWidget(QLabel("0 means the start (in) or the end (out) of the file."), 3, 0, 1, 2)
+        ggrid.setRowStretch(4, 1)
+        built_pages["Time & Loops"] = time_page
+
+        # Placeholders for the tabs not built yet, so the stack lines up with the tab row.
+        for title in INSPECTOR_TABS:
+            if title in built_pages:
+                self.insp_stack.addWidget(built_pages[title])
+                continue
+            placeholder = QFrame()
+            placeholder.setObjectName("inspectorPage")
+            pgrid = QVBoxLayout(placeholder)
+            pgrid.addWidget(QLabel(f"{title}: coming in a later update."))
+            pgrid.addStretch(1)
+            self.insp_stack.addWidget(placeholder)
+        self.insp_tabs.currentChanged.connect(self.insp_stack.setCurrentIndex)
+        outer.addWidget(self.insp_stack)
+
+        self.insp_trigger_tc.editingFinished.connect(self._inspector_apply)
+        self.insp_loop.toggled.connect(self._inspector_apply)
+        self.insp_loop_in.valueChanged.connect(self._inspector_apply)
+        self.insp_loop_out.valueChanged.connect(self._inspector_apply)
         self.insp_name.editingFinished.connect(self._inspector_apply)
         self.insp_pre.valueChanged.connect(self._inspector_apply)
         self.insp_post.valueChanged.connect(self._inspector_apply)
