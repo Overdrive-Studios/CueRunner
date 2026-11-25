@@ -58,6 +58,7 @@ from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
 from cuerunner.feedback import FeedbackSuppressor
 from cuerunner.engine import (
+    output_gains,
     Clip,
     LiveVoice,
     Mixer,
@@ -67,10 +68,12 @@ from cuerunner.engine import (
     probe_duration_ms,
     route_matrix,
 )
-from cuerunner.model import Cue, Pad, RadioSettings, Show
+from cuerunner.model import AudioPatch, Cue, Pad, RadioSettings, Show
 from cuerunner.playlist import Playlist, scan_audio
 import queue
 
+from cuerunner import levels_ui
+from cuerunner.levels_ui import OutputLevels
 from cuerunner.midi import MidiInput
 from cuerunner.recorder import MAX_TRACKS, Recorder
 from cuerunner.remote import RemoteServer, RemoteState, lan_ip
@@ -87,6 +90,17 @@ MIDI_TRIGGER_KINDS = [("Note On", "note_on"), ("Note Off", "note_off"), ("Contro
 SECOND_TRIGGER_ACTIONS = [("does nothing", "nothing"), ("starts it again", "restart"),
                           ("stops it", "stop"), ("pauses it", "pause")]
 CONTINUE_MODES = [("Do not continue", "none"), ("Auto-follow", "follow"), ("Auto-continue", "continue")]
+
+
+def _file_format(path: str) -> str:
+    """What the I/O tab shows about the file itself, read from its header."""
+    try:
+        import soundfile as sf
+
+        info = sf.info(path)
+        return f"{info.format} \u2014 {info.channels} channels @ {int(info.samplerate)} Hz"
+    except Exception:
+        return "unknown format"
 
 
 def _route_summary(route: list) -> str:
@@ -214,6 +228,89 @@ class _DownloadWorker(QThread):
         if path is None:  # cancelled by the user: nothing to report
             return
         self.done.emit(str(path))
+
+
+class PatchDialog(QDialog):
+    """Name the audio outputs the show plays through, as QLab's audio patches do.
+
+    A patch is a name, a device and a channel count. Cues choose a patch on their I/O tab.
+    """
+
+    COLUMNS = ["Name", "Device", "Channels"]
+
+    def __init__(self, patches: list[AudioPatch], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Audio Patches")
+        self.resize(620, 300)
+        self._devices = _output_device_names()
+
+        self.table = QTableWidget(0, len(self.COLUMNS), self)
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        for patch in patches:
+            self._add_row(patch)
+
+        add = QPushButton("+")
+        remove = QPushButton("\u2212")
+        add.clicked.connect(lambda: self._add_row(AudioPatch(name=self._next_name())))
+        remove.clicked.connect(self._remove_row)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        row = QHBoxLayout()
+        row.addWidget(add)
+        row.addWidget(remove)
+        row.addStretch(1)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Cues choose one of these on their I/O tab."))
+        layout.addWidget(self.table, 1)
+        layout.addLayout(row)
+        layout.addWidget(buttons)
+
+    def _next_name(self) -> str:
+        return f"Patch {self.table.rowCount() + 1}"
+
+    def _add_row(self, patch: AudioPatch) -> None:
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setItem(row, 0, QTableWidgetItem(patch.name))
+        device = QComboBox()
+        device.addItem("System default output", "")
+        for name in self._devices:
+            device.addItem(name, name)
+        device.setCurrentIndex(max(0, device.findData(patch.device)))
+        self.table.setCellWidget(row, 1, device)
+        channels = QSpinBox()
+        channels.setRange(1, MAX_CHANNELS)
+        channels.setValue(max(1, patch.channels))
+        self.table.setCellWidget(row, 2, channels)
+
+    def _remove_row(self) -> None:
+        row = self.table.currentRow()
+        if row >= 0 and self.table.rowCount() > 1:  # a show always keeps at least one patch
+            self.table.removeRow(row)
+
+    def result_patches(self) -> list[AudioPatch]:
+        patches = []
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            name = (item.text().strip() if item else "") or f"Patch {row + 1}"
+            patches.append(AudioPatch(
+                name=name,
+                device=self.table.cellWidget(row, 1).currentData() or "",
+                channels=self.table.cellWidget(row, 2).value(),
+            ))
+        return patches or [AudioPatch()]
+
+
+def _output_device_names() -> list[str]:
+    try:
+        from cuerunner.audio_io import output_devices
+
+        return [devices_label(d) for d in output_devices()]
+    except Exception:
+        return []
 
 
 class RoutingDialog(QDialog):
@@ -884,6 +981,9 @@ class MainWindow(QMainWindow):
                 self.insp_loop.setChecked(False)
                 self.insp_trigger_tc.clear()
                 self.insp_route_label.setText("Default")
+                self.insp_audio_map.setText("Default")
+                self.insp_file_target.setText("\u2014")
+                self.insp_file_format.setText("\u2014")
                 self.insp_objects_note.setText("")
                 return
             cue = cues[row]
@@ -920,7 +1020,9 @@ class MainWindow(QMainWindow):
             self.insp_second_trigger.setCurrentIndex(
                 max(0, self.insp_second_trigger.findData(cue.second_trigger)))
             self.insp_route_label.setText(_route_summary(cue.route))
-            self.insp_volume.setValue(fx.gain_to_db(cue.volume))
+            self.insp_audio_map.setText(_route_summary(cue.route))
+            self._refresh_io_tab(cue)
+            self._refresh_levels_tab(cue, editable)
             self.insp_fade_in.setValue(cue.fade_in)
             self.insp_fade_out.setValue(cue.fade_out)
             self.insp_start_time.setValue(cue.trim_in)
@@ -971,6 +1073,41 @@ class MainWindow(QMainWindow):
         """A marker was dragged: update the spin boxes, which write back to the cue."""
         self.insp_loop_in.setValue(loop_in)
         self.insp_loop_out.setValue(loop_out)
+
+    def _patches(self) -> list:
+        """The show's audio patches, never empty."""
+        if not self.show_model.audio_patches:
+            self.show_model.audio_patches = [AudioPatch()]
+        return self.show_model.audio_patches
+
+    def _patch_for(self, cue: Cue):
+        """The patch a cue plays out of: the one it names, else the first."""
+        patches = self._patches()
+        return next((p for p in patches if p.name == cue.patch), patches[0])
+
+    def _refresh_io_tab(self, cue: Cue) -> None:
+        self.insp_file_target.setText(cue.file or "\u2014")
+        self.insp_file_format.setText(_file_format(cue.file) if cue.file else "\u2014")
+        self.insp_patch.clear()
+        for patch in self._patches():
+            self.insp_patch.addItem(patch.name, patch.name)
+        chosen = self._patch_for(cue)
+        self.insp_patch.setCurrentIndex(max(0, self.insp_patch.findData(chosen.name)))
+        device = chosen.device or "system default output"
+        self.insp_patch_format.setText(f"{chosen.channels} out \u2014 {device}")
+
+    def _refresh_levels_tab(self, cue: Cue, editable: bool) -> None:
+        self.insp_levels.set_outputs(self._patch_for(cue).channels)
+        self.insp_levels.set_values(fx.gain_to_db(cue.volume), cue.output_levels,
+                                    cue.output_mutes, cue.output_solos)
+        self.insp_levels.set_editable(editable)
+
+    def edit_audio_patches(self) -> None:
+        """Name the outputs the show plays through, as QLab's audio patches do."""
+        dialog = PatchDialog(self._patches(), self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.show_model.audio_patches = dialog.result_patches()
+            self._refresh_inspector()
 
     def _refresh_objects_tab(self, cue: Cue, editable: bool) -> None:
         """The Objects tab only applies to cues that put something on a screen."""
@@ -1045,7 +1182,12 @@ class MainWindow(QMainWindow):
         cue.flagged = self.insp_flagged.isChecked()
         cue.auto_load = self.insp_auto_load.isChecked()
         cue.skip_if_disarmed = self.insp_skip.isChecked()
-        cue.volume = fx.db_to_gain(self.insp_volume.value())
+        main_db, levels, mutes, solos = self.insp_levels.values()
+        cue.volume = fx.db_to_gain(main_db)
+        cue.output_levels = levels
+        cue.output_mutes = mutes
+        cue.output_solos = solos
+        cue.patch = self.insp_patch.currentData() or ""
         cue.fade_in = self.insp_fade_in.value()
         cue.fade_out = self.insp_fade_out.value()
         cue.trim_in = self.insp_start_time.value()
@@ -1495,14 +1637,29 @@ class MainWindow(QMainWindow):
         io_page.setObjectName("inspectorPage")
         iogrid = QGridLayout(io_page)
         iogrid.setContentsMargins(12, 10, 12, 10)
+        self.insp_file_target = QLabel("—")
+        self.insp_file_target.setWordWrap(True)
+        self.insp_file_format = QLabel("—")
+        self.insp_patch = QComboBox()
+        self.insp_patch_format = QLabel("—")
+        self.insp_edit_patches = QPushButton("Edit Audio Patches…")
         self.insp_route_label = QLabel("Default")
         self.insp_route_label.setWordWrap(True)
         self.insp_route_button = QPushButton("Routing…")
-        iogrid.addWidget(QLabel("Outputs:"), 0, 0)
-        iogrid.addWidget(self.insp_route_label, 0, 1)
-        iogrid.addWidget(self.insp_route_button, 0, 2)
+        iogrid.addWidget(QLabel("File Target:"), 0, 0)
+        iogrid.addWidget(self.insp_file_target, 0, 1, 1, 2)
+        iogrid.addWidget(QLabel("Format:"), 1, 0)
+        iogrid.addWidget(self.insp_file_format, 1, 1, 1, 2)
+        iogrid.addWidget(QLabel("Audio Output:"), 2, 0)
+        iogrid.addWidget(self.insp_patch, 2, 1)
+        iogrid.addWidget(self.insp_edit_patches, 2, 2)
+        iogrid.addWidget(QLabel("Format:"), 3, 0)
+        iogrid.addWidget(self.insp_patch_format, 3, 1, 1, 2)
+        iogrid.addWidget(QLabel("Outputs:"), 4, 0)
+        iogrid.addWidget(self.insp_route_label, 4, 1)
+        iogrid.addWidget(self.insp_route_button, 4, 2)
         iogrid.setColumnStretch(1, 1)
-        iogrid.setRowStretch(1, 1)
+        iogrid.setRowStretch(5, 1)
         built_pages["I/O"] = io_page
 
         # Levels: this cue's own level, and its fades.
@@ -1510,11 +1667,11 @@ class MainWindow(QMainWindow):
         levels_page.setObjectName("inspectorPage")
         lgrid = QGridLayout(levels_page)
         lgrid.setContentsMargins(12, 10, 12, 10)
-        self.insp_volume = QDoubleSpinBox()
-        self.insp_volume.setRange(-60.0, 12.0)
-        self.insp_volume.setDecimals(1)
-        self.insp_volume.setSuffix(" dB")
-        self.insp_volume.setMaximumWidth(140)
+        self.insp_levels = OutputLevels()
+        self.insp_set_default = QPushButton("Set Default Levels")
+        self.insp_set_silent = QPushButton("Set All Silent Levels")
+        self.insp_clear_mutes = QPushButton("Clear Mutes")
+        self.insp_clear_solos = QPushButton("Clear Solos")
         self.insp_fade_in = QDoubleSpinBox()
         self.insp_fade_out = QDoubleSpinBox()
         for spin in (self.insp_fade_in, self.insp_fade_out):
@@ -1522,13 +1679,19 @@ class MainWindow(QMainWindow):
             spin.setDecimals(1)
             spin.setSuffix(" s")
             spin.setMaximumWidth(140)
-        for row, (caption, widget) in enumerate([("Level:", self.insp_volume),
-                                                 ("Fade in:", self.insp_fade_in),
-                                                 ("Fade out:", self.insp_fade_out)]):
-            lgrid.addWidget(QLabel(caption), row, 0)
-            lgrid.addWidget(widget, row, 1)
-        lgrid.addWidget(QLabel("-60 dB is silence; 0 dB plays the file at its own level."), 3, 0, 1, 2)
-        lgrid.setRowStretch(4, 1)
+        lgrid.addWidget(self.insp_set_default, 0, 0, 1, 2)
+        lgrid.addWidget(self.insp_set_silent, 1, 0, 1, 2)
+        lgrid.addWidget(self.insp_clear_mutes, 2, 0)
+        lgrid.addWidget(self.insp_clear_solos, 2, 1)
+        lgrid.addWidget(QLabel("Fade in:"), 3, 0)
+        lgrid.addWidget(self.insp_fade_in, 3, 1)
+        lgrid.addWidget(QLabel("Fade out:"), 4, 0)
+        lgrid.addWidget(self.insp_fade_out, 4, 1)
+        lgrid.addWidget(self.insp_levels, 0, 2, 5, 1)
+        lgrid.addWidget(QLabel("main is the cue's own level; the numbered faders are its outputs."),
+                        5, 0, 1, 3)
+        lgrid.setColumnStretch(2, 1)
+        lgrid.setRowStretch(6, 1)
         built_pages["Levels"] = levels_page
 
         # Trim: play only part of the file.
@@ -1562,13 +1725,19 @@ class MainWindow(QMainWindow):
         self.insp_opacity.setMaximumWidth(140)
         self.insp_objects_note = QLabel("")
         self.insp_objects_note.setWordWrap(True)
-        ogrid.addWidget(QLabel("Display:"), 0, 0)
-        ogrid.addWidget(self.insp_display, 0, 1)
-        ogrid.addWidget(QLabel("Opacity:"), 1, 0)
-        ogrid.addWidget(self.insp_opacity, 1, 1)
-        ogrid.addWidget(self.insp_objects_note, 2, 0, 1, 2)
+        self.insp_audio_map = QLabel("Default")
+        self.insp_audio_map.setWordWrap(True)
+        self.insp_view_map = QPushButton("View Audio Map…")
+        ogrid.addWidget(QLabel("Audio map:"), 0, 0)
+        ogrid.addWidget(self.insp_audio_map, 0, 1)
+        ogrid.addWidget(self.insp_view_map, 0, 2)
+        ogrid.addWidget(QLabel("Display:"), 1, 0)
+        ogrid.addWidget(self.insp_display, 1, 1)
+        ogrid.addWidget(QLabel("Opacity:"), 2, 0)
+        ogrid.addWidget(self.insp_opacity, 2, 1)
+        ogrid.addWidget(self.insp_objects_note, 3, 0, 1, 3)
         ogrid.setColumnStretch(1, 1)
-        ogrid.setRowStretch(3, 1)
+        ogrid.setRowStretch(4, 1)
         built_pages["Objects"] = objects_page
 
         # Audio FX: a three band EQ applied while the cue plays.
@@ -1619,7 +1788,9 @@ class MainWindow(QMainWindow):
             self.insp_midi_on, self.insp_midi_kind, self.insp_midi_number, self.insp_midi_channel,
             self.insp_wall_clock, self.insp_fade_stop, self.insp_fade_stop_time,
             self.insp_duck_others, self.insp_duck_by, self.insp_duck_time, self.insp_second_trigger,
-            self.insp_loop_out, self.insp_trigger_tc, self.insp_route_button, self.insp_volume,
+            self.insp_loop_out, self.insp_trigger_tc, self.insp_route_button, self.insp_patch,
+            self.insp_set_default, self.insp_set_silent, self.insp_clear_mutes,
+            self.insp_clear_solos, self.insp_view_map, self.insp_edit_patches,
             self.insp_wave,
             self.insp_fade_in, self.insp_fade_out, self.insp_start_time, self.insp_end_time,
             self.insp_trim, self.insp_play_once, self.insp_play_count, self.insp_infinite,
@@ -1627,7 +1798,15 @@ class MainWindow(QMainWindow):
             self.insp_eq_high,
         ]
         self.insp_route_button.clicked.connect(self._inspector_routing)
-        for spin in (self.insp_volume, self.insp_fade_in, self.insp_fade_out, self.insp_start_time,
+        self.insp_view_map.clicked.connect(self._inspector_routing)
+        self.insp_edit_patches.clicked.connect(self.edit_audio_patches)
+        self.insp_levels.changed.connect(self._inspector_apply)
+        self.insp_patch.currentIndexChanged.connect(self._inspector_apply)
+        self.insp_set_default.clicked.connect(lambda: self.insp_levels.set_all(0))
+        self.insp_set_silent.clicked.connect(lambda: self.insp_levels.set_all(levels_ui.MIN_DB))
+        self.insp_clear_mutes.clicked.connect(self.insp_levels.clear_mutes)
+        self.insp_clear_solos.clicked.connect(self.insp_levels.clear_solos)
+        for spin in (self.insp_fade_in, self.insp_fade_out, self.insp_start_time,
                      self.insp_end_time, self.insp_trim, self.insp_play_count,
                      self.insp_eq_low, self.insp_eq_mid, self.insp_eq_high):
             spin.valueChanged.connect(self._inspector_apply)
@@ -2257,6 +2436,9 @@ class MainWindow(QMainWindow):
         voice.end = end
         voice.plays = max(1, cue.play_count)
         voice.fx = self._cue_eq(cue, clip.channels)
+        outs = voice.matrix.shape[1]
+        voice.matrix = voice.matrix * output_gains(cue.output_levels, cue.output_mutes,
+                                                   cue.output_solos, outs)[None, :]
 
     def _start_midifile(self, cue: Cue) -> None:
         """Play the cue's MIDI file out to its port. It plays on in the background until it ends or Stop or Panic."""

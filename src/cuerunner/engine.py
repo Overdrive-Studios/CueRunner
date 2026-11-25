@@ -55,6 +55,27 @@ def probe_duration_ms(path: str | Path) -> int:
     return round(info.frames * 1000 / info.samplerate)
 
 
+def output_gains(levels: list[float], mutes: list[bool], solos: list[bool],
+                 out_channels: int) -> np.ndarray:
+    """Per output gain from the Levels tab: dB faders, with mute and solo applied.
+
+    Any solo silences every output that is not soloed, which is what a solo button is for.
+    Mute wins over solo on the same output.
+    """
+    gains = np.ones(out_channels, dtype=np.float32)
+    for index in range(out_channels):
+        db = levels[index] if index < len(levels) else 0.0
+        gains[index] = 0.0 if db <= -60 else float(10 ** (db / 20))
+    if any(solos[:out_channels]):
+        for index in range(out_channels):
+            if not (index < len(solos) and solos[index]):
+                gains[index] = 0.0
+    for index in range(out_channels):
+        if index < len(mutes) and mutes[index]:
+            gains[index] = 0.0
+    return gains
+
+
 def route_matrix(route: list[list[int]], clip_channels: int, out_channels: int) -> np.ndarray:
     """Matrix from a cue's route: route[i] is the list of 1-based outputs that clip channel i goes to.
 
