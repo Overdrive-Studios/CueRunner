@@ -49,6 +49,11 @@ class Cue:
     protocol: str = "artnet"  # light cues: "artnet" or "sacn"; network cues: "udp" or "tcp"
     group_mode: str = "all"  # group cues: "all" fires every child; "playlist" runs them one after another
     universe: int = 0  # light cues: the Art-Net universe
+    opacity: float = 1.0  # video cues: 0 to 1, applied to the output window while the cue plays
+    loop_in: float = 0.0  # seconds: where a loop starts (0 for the start of the file)
+    loop_out: float = 0.0  # seconds: where a loop wraps back to loop_in (0 for the end of the file)
+    armed: bool = True  # disarmed cues are skipped by GO and cannot be started
+    new_target: str = ""  # target cues: what the cue named in target now points at
     trigger_tc: str = ""  # HH:MM:SS:FF; fires when incoming timecode passes it (empty for none)
     fps: int = 30  # timecode cues: MIDI Timecode frame rate (24, 25 or 30)
     colour: str = ""  # a hex colour shown on the cue's row, e.g. "#2980b9"; empty for none

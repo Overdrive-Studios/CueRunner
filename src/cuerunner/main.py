@@ -6,6 +6,8 @@ they can overlap, and the mixer is fed to the sound card by audio_io.
 
 from __future__ import annotations
 
+import shlex
+import subprocess
 import sys
 import tempfile
 from datetime import datetime
@@ -140,6 +142,10 @@ SPECIAL_KINDS = {
     "osc": "OSC",
     "text": "Text",
     "fade": "Fade",
+    "devamp": "Devamp",
+    "target": "Target",
+    "program": "Run Program",
+    "midifile": "MIDI File",
     "control": "Control",
     "wait": "Wait",
     "group": "Group",
@@ -256,6 +262,18 @@ class CueDialog(QDialog):
         self.fade_out = self._fade_spin(cue.fade_out)
         self.loop_box = QCheckBox("Loop until stopped")
         self.loop_box.setChecked(cue.loop)
+        self.loop_in_spin = QDoubleSpinBox()
+        self.loop_in_spin.setRange(0, 86400)
+        self.loop_in_spin.setDecimals(2)
+        self.loop_in_spin.setSuffix(" s")
+        self.loop_in_spin.setValue(cue.loop_in)
+        self.loop_in_spin.setToolTip("Where the loop starts. 0 means the start of the file.")
+        self.loop_out_spin = QDoubleSpinBox()
+        self.loop_out_spin.setRange(0, 86400)
+        self.loop_out_spin.setDecimals(2)
+        self.loop_out_spin.setSuffix(" s")
+        self.loop_out_spin.setValue(cue.loop_out)
+        self.loop_out_spin.setToolTip("Where the loop wraps back to the loop start. 0 means the end of the file.")
         self.then_box = QComboBox()
         self.then_box.addItem("Nothing", "none")
         self.then_box.addItem("Follow: start the next cue when this one ends", "follow")
@@ -269,6 +287,10 @@ class CueDialog(QDialog):
             self.display_box.addItem(label, value)
         current = max(0, self.display_box.findData(cue.video_output))
         self.display_box.setCurrentIndex(current)
+        self.opacity_spin = QSpinBox()
+        self.opacity_spin.setRange(0, 100)
+        self.opacity_spin.setSuffix(" %")
+        self.opacity_spin.setValue(round(cue.opacity * 100))
         self.route_label = QLabel(self._route_summary())
         self.route_button = QPushButton("Routing...")
         self.route_button.clicked.connect(self._edit_routing)
@@ -282,6 +304,8 @@ class CueDialog(QDialog):
         form.addRow("Fade in", self.fade_in)
         form.addRow("Fade out", self.fade_out)
         form.addRow("", self.loop_box)
+        form.addRow("Loop in", self.loop_in_spin)
+        form.addRow("Loop out", self.loop_out_spin)
         form.addRow("Then", self.then_box)
         form.addRow("Hotkey", self.hotkey_edit)
         outputs_row = QHBoxLayout()
@@ -290,6 +314,8 @@ class CueDialog(QDialog):
         form.addRow("Outputs", outputs_row)
         if self._cue_kind in ("video", "camera", "text"):
             form.addRow("Display", self.display_box)
+        if self._cue_kind == "video":
+            form.addRow("Opacity", self.opacity_spin)
         self._build_kind_fields(cue, form, groups or [])
         form.addRow(buttons)
 
@@ -316,6 +342,9 @@ class CueDialog(QDialog):
         self.trigger_tc_edit = QLineEdit(cue.trigger_tc)
         self.trigger_tc_edit.setPlaceholderText("Blank for none, e.g. 00:01:30:00")
         form.addRow("Timecode trigger", self.trigger_tc_edit)
+        self.armed_box = QCheckBox("Armed (GO skips disarmed cues)")
+        self.armed_box.setChecked(cue.armed)
+        form.addRow("", self.armed_box)
         self.target_edit = QLineEdit(cue.target)
         self.target_edit.setPlaceholderText("Cue number, e.g. 3")
         self.action_box = QComboBox()
@@ -325,6 +354,9 @@ class CueDialog(QDialog):
         self.action_box.addItem("Resume", "resume")
         self.action_box.addItem("Goto", "goto")
         self.action_box.addItem("Load", "load")
+        self.action_box.addItem("Reset", "reset")
+        self.action_box.addItem("Arm", "arm")
+        self.action_box.addItem("Disarm", "disarm")
         self.light_universe = QSpinBox()
         self.light_universe.setRange(0, 32767)
         self.light_universe.setValue(cue.universe)
@@ -362,6 +394,25 @@ class CueDialog(QDialog):
         if kind == "control":
             form.addRow("Cue number", self.target_edit)
             form.addRow("Action", self.action_box)
+        if kind == "devamp":
+            form.addRow("Loop cue", self.target_edit)
+        if kind == "program":
+            self.program_edit = QLineEdit(cue.file)
+            self.program_edit.setPlaceholderText("Path to the program, e.g. /usr/bin/say")
+            browse = QPushButton("Browse…")
+            browse.clicked.connect(self._browse_program)
+            row_box = QHBoxLayout()
+            row_box.addWidget(self.program_edit, 1)
+            row_box.addWidget(browse)
+            self.program_args_edit = QLineEdit(cue.text)
+            self.program_args_edit.setPlaceholderText("Arguments, separated by spaces")
+            form.addRow("Program", row_box)
+            form.addRow("Arguments", self.program_args_edit)
+        if kind == "target":
+            self.new_target_edit = QLineEdit(cue.new_target)
+            self.new_target_edit.setPlaceholderText("Cue number, or a file path for audio and video")
+            form.addRow("Cue to change", self.target_edit)
+            form.addRow("New target", self.new_target_edit)
         if kind == "fade":
             form.addRow("Cue number", self.target_edit)
             form.addRow("Fade to", self.level_spin)
@@ -369,7 +420,7 @@ class CueDialog(QDialog):
         if kind == "osc":
             form.addRow("Send to", self.osc_target_edit)
             form.addRow("Message", self.osc_message_edit)
-        if kind in ("midi", "timecode"):
+        if kind in ("midi", "timecode", "midifile"):
             self.midi_port_box = QComboBox()
             try:
                 ports = midi.output_port_names()
@@ -383,6 +434,15 @@ class CueDialog(QDialog):
             form.addRow("MIDI port", self.midi_port_box)
             if kind == "midi":
                 form.addRow("Message", self.osc_message_edit)
+            elif kind == "midifile":
+                self.midifile_edit = QLineEdit(cue.file)
+                self.midifile_edit.setPlaceholderText("Path to a .mid file")
+                browse = QPushButton("Browse…")
+                browse.clicked.connect(self._browse_midifile)
+                file_row = QHBoxLayout()
+                file_row.addWidget(self.midifile_edit, 1)
+                file_row.addWidget(browse)
+                form.addRow("MIDI file", file_row)
             else:
                 self.timecode_start_edit = QLineEdit(cue.text or "00:00:00:00")
                 self.fps_box = QComboBox()
@@ -442,6 +502,16 @@ class CueDialog(QDialog):
         spin.setValue(value)
         return spin
 
+    def _browse_midifile(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(self, "Choose a MIDI file", "", "MIDI files (*.mid *.midi)")
+        if filename:
+            self.midifile_edit.setText(filename)
+
+    def _browse_program(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(self, "Choose a program", "")
+        if filename:
+            self.program_edit.setText(filename)
+
     def _accept_checked(self) -> None:
         """OK, but only when the timecode trigger is blank or a valid HH:MM:SS:FF."""
         text = self.trigger_tc_edit.text().strip() if hasattr(self, "trigger_tc_edit") else ""
@@ -458,21 +528,34 @@ class CueDialog(QDialog):
         cue.fade_in = self.fade_in.value()
         cue.fade_out = self.fade_out.value()
         cue.loop = self.loop_box.isChecked()
+        cue.loop_in = self.loop_in_spin.value()
+        cue.loop_out = self.loop_out_spin.value()
         cue.then = self.then_box.currentData()
         cue.hotkey = self.hotkey_edit.keySequence().toString()
         cue.route = [list(group) for group in self._route]
         if cue.kind in ("video", "camera", "text") and self.display_box.count():
             cue.video_output = self.display_box.currentData()
+        if cue.kind == "video":
+            cue.opacity = self.opacity_spin.value() / 100
         cue.parent = self.parent_box.currentData() or ""
         cue.pre_wait_ms = int(self.pre_wait_spin.value() * 1000)
         cue.post_wait_ms = int(self.post_wait_spin.value() * 1000)
         cue.trigger_tc = self.trigger_tc_edit.text().strip()
+        cue.armed = self.armed_box.isChecked()
         cue.colour = self.colour_box.currentData() or ""
-        if cue.kind in ("control", "fade"):
+        if cue.kind in ("control", "fade", "devamp", "target"):
             cue.target = self.target_edit.text().strip()
+        if cue.kind == "target":
+            cue.new_target = self.new_target_edit.text().strip()
+        if cue.kind == "program":
+            cue.file = self.program_edit.text().strip()
+            cue.text = self.program_args_edit.text().strip()
         if cue.kind == "midi":
             cue.target = self.midi_port_box.currentData() or ""
             cue.text = self.osc_message_edit.text().strip()
+        if cue.kind == "midifile":
+            cue.target = self.midi_port_box.currentData() or ""
+            cue.file = self.midifile_edit.text().strip()
         if cue.kind == "timecode":
             cue.target = self.midi_port_box.currentData() or ""
             cue.text = self.timecode_start_edit.text().strip() or "00:00:00:00"
@@ -568,6 +651,7 @@ class MainWindow(QMainWindow):
         self._clips: dict[str, Clip] = {}
         self._cue_voices: list[Voice] = []
         self._timers: list[QTimer] = []
+        self._midifile_runs: dict[int, tuple] = {}  # id(cue) -> (cue, player)
         self._timecode_runs: dict[int, tuple] = {}  # id(cue) -> (cue, generator, timer, port)
         self._dmx_last: dict[tuple[str, int], dict[int, int]] = {}
         self._video = video_out.VideoOutputs(self)
@@ -622,6 +706,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         self._stop_timecode()
+        self._stop_midifile()
         self._video.close()
         super().closeEvent(event)
 
@@ -797,6 +882,14 @@ class MainWindow(QMainWindow):
         """What the File column shows for each cue type."""
         if cue.kind == "control":
             return f"{cue.action.title()} cue {cue.target}"
+        if cue.kind == "devamp":
+            return f"Ends the loop on cue {cue.target}"
+        if cue.kind == "midifile":
+            return f"{Path(cue.file).name or 'no file'} to {cue.target or 'no port'}"
+        if cue.kind == "program":
+            return f"Runs {cue.file or 'no program'} {cue.text}".rstrip()
+        if cue.kind == "target":
+            return f"Cue {cue.target} now targets {cue.new_target or 'nothing'}"
         if cue.kind == "fade":
             return f"Fade cue {cue.target} to {round(cue.level * 100)}% over {cue.seconds:g} s"
         if cue.kind == "wait":
@@ -1406,6 +1499,15 @@ class MainWindow(QMainWindow):
         cues = self.show_model.cues
         self.table.selectRow(min(row + 1, len(cues) - 1))
 
+    def _reset_cue(self, target: Cue) -> None:
+        """Stop the cue at once and return it to its unplayed state."""
+        if self.mixer is not None:
+            self.mixer.kill(target)
+        self._stop_timecode(target)
+        if target.kind in ("video", "camera", "text"):
+            self._video.stop_all()
+        self._refresh_table()
+
     def _control(self, cue: Cue) -> None:
         number = cue.target.strip()
         cues = self.show_model.cues
@@ -1422,6 +1524,11 @@ class MainWindow(QMainWindow):
             self.table.selectRow(target_row)
         elif cue.action == "load":
             self._preload(target)
+        elif cue.action == "reset":
+            self._reset_cue(target)
+        elif cue.action in ("arm", "disarm"):
+            target.armed = cue.action == "arm"
+            self._refresh_table()
         else:
             self.go_row(target_row, replace=True)
 
@@ -1457,6 +1564,9 @@ class MainWindow(QMainWindow):
         if target.kind == "timecode":
             self._stop_timecode(target)
             return
+        if target.kind == "midifile":
+            self._stop_midifile(target)
+            return
         if target.kind == "mic":
             self.stop_talkback()
             return
@@ -1485,6 +1595,56 @@ class MainWindow(QMainWindow):
         for voice in self._cue_voices:
             if not voice.done and voice.tag is target:
                 voice.paused = paused
+
+    def _loop_frames(self, cue: Cue) -> tuple[int, int]:
+        """A cue's loop in and out points as frames at the mixer's rate (0 means the file's start or end)."""
+        rate = self.mixer.rate if self.mixer is not None else 48000
+        return round(cue.loop_in * rate), round(cue.loop_out * rate)
+
+    def _start_midifile(self, cue: Cue) -> None:
+        """Play the cue's MIDI file out to its port. It plays on in the background until it ends or Stop or Panic."""
+        self._stop_midifile(cue)
+        player = midi.MidiFilePlayer(cue.file, cue.target)
+        self._midifile_runs[id(cue)] = (cue, player)
+        player.start()
+
+    def _stop_midifile(self, cue: Cue | None = None) -> None:
+        for key, (owner, player) in list(self._midifile_runs.items()):
+            if cue is not None and owner is not cue:
+                continue
+            player.stop()
+            del self._midifile_runs[key]
+
+    def _run_program(self, cue: Cue) -> None:
+        """Start a program with the arguments typed on the cue. No shell is used, so nothing is interpreted."""
+        program = cue.file.strip()
+        if not program:
+            raise ValueError("Choose a program for this cue.")
+        arguments = shlex.split(cue.text)
+        subprocess.Popen([program, *arguments], stdin=subprocess.DEVNULL)
+
+    def _retarget_cue(self, cue: Cue) -> None:
+        """Point the named cue at a new target: a cue number for control, fade and devamp cues, a file for audio and video."""
+        number = cue.target.strip()
+        new = cue.new_target.strip()
+        target = next((c for c in self.show_model.cues if c.number == number), None)
+        if target is None:
+            raise ValueError(f"There is no cue {number or '(blank)'} to change.")
+        if target.kind in ("control", "fade", "devamp", "target"):
+            target.target = new
+        elif target.kind in ("audio", "video"):
+            target.file = new
+        else:
+            raise ValueError(f"Cue {number} ({target.kind}) has no target to change.")
+
+    def _devamp_cue(self, cue: Cue) -> None:
+        """Stop the loop on the target cue's playing voices so they play out to the end."""
+        if self.mixer is None:
+            return
+        number = cue.target.strip()
+        for voice in self._cue_voices:
+            if not voice.done and voice.tag is not None and getattr(voice.tag, "number", None) == number:
+                self.mixer.devamp(voice)
 
     def _fade_cue(self, cue: Cue) -> None:
         number = cue.target.strip()
@@ -1522,6 +1682,8 @@ class MainWindow(QMainWindow):
             clip=clip,
             matrix=route_matrix(cue.route, clip.channels, self.mixer.out_channels),
             loop=cue.loop,
+            loop_start=self._loop_frames(cue)[0],
+            loop_end=self._loop_frames(cue)[1],
             bed=True,
             tag=cue,
             paused=True,
@@ -1601,6 +1763,9 @@ class MainWindow(QMainWindow):
 
         replace=True fades out whatever cue is already playing. replace=False lets it run on.
         """
+        if not self.show_model.cues[row].armed:
+            self._advance(row)  # disarmed cues are skipped, as QLab does on GO
+            return
         cues = self.show_model.cues
         if not 0 <= row < len(cues):
             return
@@ -1622,6 +1787,7 @@ class MainWindow(QMainWindow):
             else:
                 try:
                     self._video.play(cue.video_output, cue.file, self.show_model.video_routes, cue.number)
+                    self._video.set_opacity(cue.video_output, cue.opacity, self.show_model.video_routes)
                 except Exception as exc:
                     QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
             self.table.selectRow(min(row + 1, len(cues) - 1))
@@ -1709,6 +1875,31 @@ class MainWindow(QMainWindow):
             self._fade_cue(cue)
             self._finish(row)
             return
+        if cue.kind == "devamp":
+            self._devamp_cue(cue)
+            self._finish(row)
+            return
+        if cue.kind == "midifile":
+            try:
+                self._start_midifile(cue)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot play MIDI file", f"{cue.name}\n\n{exc}")
+            self._finish(row)
+            return
+        if cue.kind == "program":
+            try:
+                self._run_program(cue)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot run program", f"{cue.name}\n\n{exc}")
+            self._finish(row)
+            return
+        if cue.kind == "target":
+            try:
+                self._retarget_cue(cue)
+            except Exception as exc:
+                QMessageBox.warning(self, "Cannot change target", f"{cue.name}\n\n{exc}")
+            self._finish(row)
+            return
         if self.mixer is None:
             return
         if cue.kind == "audio" and cue.file:
@@ -1734,6 +1925,8 @@ class MainWindow(QMainWindow):
                 clip=clip,
                 matrix=route_matrix(cue.route, clip.channels, self.mixer.out_channels),
                 loop=cue.loop,
+                loop_start=self._loop_frames(cue)[0],
+                loop_end=self._loop_frames(cue)[1],
                 bed=True,
                 tag=cue,
             )
@@ -1771,6 +1964,7 @@ class MainWindow(QMainWindow):
             self.mixer.paused = False
         self._cue_voices = []
         self._stop_timecode()
+        self._stop_midifile()
         for timer in self._timers:
             timer.stop()
         self._timers = []

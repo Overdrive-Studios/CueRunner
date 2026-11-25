@@ -169,6 +169,11 @@ class VideoOutputs(QObject):
         out.show_on_screen(fit)
         return out
 
+    def set_opacity(self, output: str, opacity: float, routes: list[dict] | None = None) -> None:
+        """Fade the output window itself: 1 is solid, 0 is invisible. Values outside 0 to 1 are clamped."""
+        out = self._output_for(output, routes or [])
+        out.widget.setWindowOpacity(max(0.0, min(1.0, float(opacity))))
+
     def play(self, output: str, path: str, routes: list[dict] | None = None, number: str = "") -> None:
         out = self._output_for(output, routes or [])
         out.stop_camera()
