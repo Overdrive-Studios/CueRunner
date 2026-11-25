@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QBrush, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -495,7 +495,9 @@ class MainWindow(QMainWindow):
         audio_menu.addAction("Start MIDI Input...", self.start_midi)
         audio_menu.addAction("Stop MIDI Input", self.stop_midi)
         audio_menu.addAction("MIDI Mapping...", self.edit_midi_mapping)
-        audio_menu.addAction("Settings...", self.open_settings)
+        settings_action = audio_menu.addAction("Settings...", self.open_settings)
+        settings_action.setShortcut(QKeySequence(QKeySequence.StandardKey.Preferences))
+        settings_action.setMenuRole(QAction.MenuRole.PreferencesRole)
         audio_menu.addAction("Spotify...", self.open_spotify)
         audio_menu.addAction("Allen & Heath Console...", self.open_console)
         audio_menu.addSeparator()
