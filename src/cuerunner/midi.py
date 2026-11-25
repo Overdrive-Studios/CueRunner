@@ -17,6 +17,21 @@ from cuerunner.model import DEFAULT_MIDI_MAP
 DEFAULT_MAP: dict[str, str] = dict(DEFAULT_MIDI_MAP)
 
 
+def trigger_key(message) -> tuple[str, int, int] | None:
+    """(kind, number, channel) for a message a cue can be triggered by, or None.
+
+    Channel is 1-based, as it is written on consoles and in QLab.
+    """
+    channel = int(getattr(message, "channel", 0)) + 1
+    if message.type == "note_on" and message.velocity > 0:
+        return ("note_on", int(message.note), channel)
+    if message.type == "note_off" or (message.type == "note_on" and message.velocity == 0):
+        return ("note_off", int(message.note), channel)
+    if message.type == "control_change":
+        return ("control_change", int(message.control), channel)
+    return None
+
+
 def key_for(message) -> str | None:
     """A key for the mapping table: note-on with velocity above zero, or control change with value above zero."""
     if message.type == "note_on" and message.velocity > 0:
@@ -80,11 +95,14 @@ def input_port_names() -> list[str]:
 
 
 class MidiInput:
-    def __init__(self, port_name: str, on_command: Callable[[str], None], mapping: dict[str, str] | None = None) -> None:
+    def __init__(self, port_name: str, on_command: Callable[[str], None],
+                 mapping: dict[str, str] | None = None,
+                 on_trigger: Callable[[tuple[str, int, int]], None] | None = None) -> None:
         import mido
 
         self._mapping = dict(DEFAULT_MAP if mapping is None else mapping)
         self._on_command = on_command
+        self._on_trigger = on_trigger  # raw messages, for cues with their own MIDI trigger
         self._port = mido.open_input(port_name, callback=self._callback)
 
     def set_mapping(self, mapping: dict[str, str]) -> None:
@@ -94,6 +112,10 @@ class MidiInput:
         command = command_for(self._mapping, key_for(message))
         if command is not None:
             self._on_command(command)
+        if self._on_trigger is not None:
+            trigger = trigger_key(message)
+            if trigger is not None:
+                self._on_trigger(trigger)
 
     def close(self) -> None:
         self._port.close()
