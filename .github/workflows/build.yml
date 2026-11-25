@@ -50,15 +50,41 @@ jobs:
           path: dist/CueRunner.dmg
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Runs on a version tag, or on a push to main when the version in version.py has no release yet.
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
     needs: [windows, macos]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      - uses: actions/checkout@v4
+      - name: Work out the release tag
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            VERSION=$(python3 -c "import re; print(re.search(r'__version__ = \"(.*)\"', open('src/cuerunner/version.py').read()).group(1))")
+            TAG="v${VERSION}"
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+            if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" >/dev/null 2>&1; then
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
       - uses: actions/download-artifact@v4
+        if: steps.version.outputs.publish == 'true'
         with:
           path: downloads
       - uses: softprops/action-gh-release@v2
+        if: steps.version.outputs.publish == 'true'
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: |
             downloads/CueRunner-windows/CueRunner.exe
             downloads/CueRunner-macos/CueRunner.dmg
