@@ -112,3 +112,23 @@ class MidiTcpSender:
                     self._sock.close()
                 finally:
                     self._sock = None
+
+
+def parse_sq_command(text: str, channel: int = 1) -> bytes:
+    """Parse a console cue command for the SQ.
+
+    Accepted forms: "scene 7", "mute 1", "unmute 1", "level 1 -6", "level 1 -inf".
+    Raises ValueError with a readable message if the text doesn't match.
+    """
+    parts = text.strip().lower().split()
+    try:
+        if len(parts) == 2 and parts[0] == "scene":
+            return sq_scene_recall(int(parts[1]), channel)
+        if len(parts) == 2 and parts[0] in ("mute", "unmute"):
+            return sq_mute(int(parts[1]), parts[0] == "mute", channel)
+        if len(parts) == 3 and parts[0] == "level":
+            db = -120.0 if parts[2] in ("-inf", "-infinity") else float(parts[2])
+            return sq_level_db(int(parts[1]), db, channel)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+    raise ValueError("Use: scene 7, mute 1, unmute 1, level 1 -6 or level 1 -inf")

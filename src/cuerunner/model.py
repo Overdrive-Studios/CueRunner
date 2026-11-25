@@ -63,6 +63,7 @@ class Show:
     duck_level: float = DEFAULT_DUCK_LEVEL  # music level while the talkback mic is open, 0 to 1
     remote_port: int = DEFAULT_REMOTE_PORT
     spotify_client_id: str = ""  # from the Spotify developer app; not a secret when using PKCE
+    console_host: str = ""  # Allen & Heath console IP address
 
     def next_number(self) -> str:
         numbers = []
@@ -84,6 +85,7 @@ class Show:
             "duck_level": self.duck_level,
             "remote_port": self.remote_port,
             "spotify_client_id": self.spotify_client_id,
+            "console_host": self.console_host,
         }
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -108,4 +110,5 @@ class Show:
             duck_level=duck_level,
             remote_port=int(data.get("remote_port", DEFAULT_REMOTE_PORT)),
             spotify_client_id=str(data.get("spotify_client_id", "")),
+            console_host=str(data.get("console_host", "")),
         )

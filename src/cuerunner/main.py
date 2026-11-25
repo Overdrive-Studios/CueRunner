@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cuerunner import spotify, spotify_ui, updater
+from cuerunner import allenheath, console_ui, spotify, spotify_ui, updater
 from cuerunner.countdown import Countdown
 from cuerunner.dsp import MicChain
 from cuerunner.feedback import FeedbackSuppressor
@@ -232,6 +232,7 @@ class MainWindow(QMainWindow):
         self._midi_commands: queue.Queue[str] = queue.Queue()
         self._spotify: spotify.SpotifyClient | None = None
         self._spotify_playing = False
+        self._console: allenheath.MidiTcpSender | None = None
 
         self._build_toolbar()
         self._build_menus()
@@ -319,6 +320,7 @@ class MainWindow(QMainWindow):
         for label, handler in [
             ("Add Audio Cue...", self.add_audio_cue),
             ("Add Spotify Cue...", self.add_spotify_cue),
+            ("Add Console Cue...", self.add_console_cue),
             ("Edit Cue...", self.edit_selected),
             ("Remove Cue", self.remove_cue),
         ]:
@@ -345,6 +347,7 @@ class MainWindow(QMainWindow):
         audio_menu.addAction("Duck Level...", self.choose_duck_level)
         audio_menu.addAction("Phone Remote Port...", self.choose_remote_port)
         audio_menu.addAction("Spotify...", self.open_spotify)
+        audio_menu.addAction("Allen & Heath Console...", self.open_console)
         audio_menu.addSeparator()
         audio_menu.addAction("Start Venue Radio", self.start_radio)
         audio_menu.addAction("Stop Venue Radio", self.stop_radio)
@@ -569,6 +572,51 @@ class MainWindow(QMainWindow):
 
     # --- Cue actions --------------------------------------------------
 
+    def add_console_cue(self) -> None:
+        text, ok = QInputDialog.getText(
+            self, "Add console cue", "Command (scene 7, mute 1, unmute 1, level 1 -6, level 1 -inf):"
+        )
+        if not ok:
+            return
+        try:
+            allenheath.parse_sq_command(text)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Add console cue", str(exc))
+            return
+        cue = Cue(number=self.show_model.next_number(), name=text.strip(), kind="console", file=text.strip())
+        self.show_model.cues.append(cue)
+        self._refresh_table()
+
+    def open_console(self) -> None:
+        dialog = console_ui.ConsoleDialog(self.show_model.console_host, self._console_for, self)
+        dialog.exec()
+        self.show_model.console_host = dialog.host.text().strip()
+
+    def _console_for(self, host: str) -> allenheath.MidiTcpSender | None:
+        if not host:
+            return None
+        if self._console is None or self._console._host != host:
+            if self._console is not None:
+                self._console.close()
+            self._console = allenheath.MidiTcpSender(host, allenheath.SQ_PORT)
+        return self._console
+
+    def _send_console_cue(self, cue: Cue) -> None:
+        sender = self._console_for(self.show_model.console_host)
+        if sender is None:
+            QMessageBox.warning(self, "Console cue", "Set the console's IP address under Audio → Allen & Heath Console first.")
+            return
+        try:
+            data = allenheath.parse_sq_command(cue.file, channel=1)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Console cue", f"{cue.name}\n\n{exc}")
+            return
+        spotify_ui.run_async(
+            self,
+            lambda: sender.send(data),
+            lambda _r, error: QMessageBox.warning(self, "Console cue", f"{cue.name}\n\n{error}") if error is not None else None,
+        )
+
     def add_spotify_cue(self) -> None:
         text, ok = QInputDialog.getText(self, "Add Spotify cue", "Paste a Spotify link or spotify: URI:")
         if not ok:
@@ -668,6 +716,10 @@ class MainWindow(QMainWindow):
         cue = cues[row]
         if cue.kind == "spotify":
             self._play_spotify_cue(cue)
+            self.table.selectRow(min(row + 1, len(cues) - 1))
+            return
+        if cue.kind == "console":
+            self._send_console_cue(cue)
             self.table.selectRow(min(row + 1, len(cues) - 1))
             return
         if self.mixer is None:
