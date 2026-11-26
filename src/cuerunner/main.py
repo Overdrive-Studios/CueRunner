@@ -72,6 +72,7 @@ from cuerunner.engine import (
 )
 from cuerunner.model import AudioPatch, Cue, Pad, RadioSettings, Show
 from cuerunner.playlist import Playlist, scan_audio
+import math
 import queue
 
 from cuerunner import levels_ui
@@ -824,6 +825,7 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_menus()
         self._last_row = -1  # the last row that was highlighted; GO continues from it
+        self._refreshing = False  # True while the table is being rebuilt, not edited
         self._quitting = False  # guards against the quit being handled twice
         self._build_central()
         self.setAcceptDrops(True)  # drop audio, video or MIDI files onto the window to add cues
@@ -1035,6 +1037,7 @@ class MainWindow(QMainWindow):
             self.insp_infinite.setChecked(cue.loop)
             self.insp_play_once.setChecked(not cue.loop)
             self.insp_rate.setValue(cue.rate or 1.0)
+            self.insp_preserve_pitch.setChecked(cue.preserve_pitch)
             self.insp_integrated.setChecked(cue.integrated_fade)
             self.insp_curve.setCurrentIndex(max(0, self.insp_curve.findData(cue.fade_curve)))
             self._refresh_effects(cue)
@@ -1321,6 +1324,7 @@ class MainWindow(QMainWindow):
             if item is not None:
                 item.setText(fx.describe(cue.effects[chosen]))
         cue.rate = self.insp_rate.value()
+        cue.preserve_pitch = self.insp_preserve_pitch.isChecked()
         cue.integrated_fade = self.insp_integrated.isChecked()
         cue.fade_curve = self.insp_curve.currentData() or "linear"
         if self.insp_display.isEnabled():
@@ -1538,10 +1542,18 @@ class MainWindow(QMainWindow):
         self.table.setHorizontalHeaderLabels(COLUMNS)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        # Double clicking a cue's name renames it in place; nothing else is typed into.
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
+        self.table.itemChanged.connect(self._name_edited)
         self.table.setShowGrid(False)
         self.table.setAlternatingRowColors(True)
-        self.table.verticalHeader().setVisible(False)
+        # A plain count down the left, so cues can be referred to by position as well as
+        # by their own number, which the user is free to change.
+        rows = self.table.verticalHeader()
+        rows.setVisible(True)
+        rows.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        rows.setDefaultSectionSize(26)
+        rows.setFixedWidth(40)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(NAME_COL, QHeaderView.ResizeMode.Stretch)
@@ -1759,9 +1771,7 @@ class MainWindow(QMainWindow):
         self.insp_rate.setDecimals(2)
         self.insp_rate.setMaximumWidth(90)
         self.insp_preserve_pitch = QCheckBox("Preserve pitch")
-        self.insp_preserve_pitch.setEnabled(False)
-        self.insp_preserve_pitch.setToolTip("Not available yet: holding pitch while changing "
-                                            "rate needs time stretching.")
+        self.insp_preserve_pitch.setToolTip("Hold the pitch where it is while the rate changes.")
         self.insp_integrated = QCheckBox("Integrated fade")
         self.insp_curve = QComboBox()
         for label, value in FADE_CURVES:
@@ -1955,7 +1965,8 @@ class MainWindow(QMainWindow):
             self.insp_wave,
             self.insp_fade_in, self.insp_fade_out, self.insp_start_time, self.insp_end_time,
             self.insp_trim, self.insp_play_once, self.insp_play_count, self.insp_infinite,
-            self.insp_rate, self.insp_integrated, self.insp_curve, self.insp_add_slice,
+            self.insp_rate, self.insp_preserve_pitch, self.insp_integrated, self.insp_curve,
+            self.insp_add_slice,
             self.insp_clear_slices,
             self.insp_display, self.insp_opacity, self.insp_fx_list, self.insp_fx_add,
             self.insp_fx_remove,
@@ -1980,6 +1991,7 @@ class MainWindow(QMainWindow):
         self.insp_play_once.toggled.connect(self._inspector_apply)
         self.insp_add_slice.clicked.connect(self._add_slice)
         self.insp_clear_slices.clicked.connect(self._clear_slices)
+        self.insp_preserve_pitch.toggled.connect(self._inspector_apply)
         self.insp_integrated.toggled.connect(self._inspector_apply)
         self.insp_curve.currentIndexChanged.connect(self._inspector_apply)
         self.insp_opacity.valueChanged.connect(self._inspector_apply)
@@ -2071,6 +2083,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"CueRunner - {name}{' •' if unsaved else ''}")
 
     def _refresh_table(self) -> None:
+        self._refreshing = True
+        try:
+            self._fill_table()
+        finally:
+            self._refreshing = False
+
+    def _fill_table(self) -> None:
         cues = self.show_model.cues
         if hasattr(self, "_saved_json"):
             self._refresh_title()  # the title carries a dot while there is unsaved work
@@ -2105,6 +2124,10 @@ class MainWindow(QMainWindow):
                 if col == PROGRESS_COL:
                     continue
                 item = QTableWidgetItem(value)
+                if col == NAME_COL:
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                else:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if row == playing_row:
                     item.setBackground(QBrush(PLAYING_COLOUR))
                 elif cue.colour:
@@ -2122,6 +2145,7 @@ class MainWindow(QMainWindow):
             self.table.setCellWidget(row, PROGRESS_COL, bar)
             self._row_bars.append(bar)
 
+        self.table.setVerticalHeaderLabels([str(i + 1) for i in range(len(cues))])
         total_ms = sum(c.duration_ms for c in cues)
         self.trt_label.setText(format_hms(total_ms))
         self.soundboard.set_pads(self.show_model.pads)
@@ -2185,6 +2209,24 @@ class MainWindow(QMainWindow):
         if event.type() == QEvent.Type.MouseButtonPress and isinstance(obj, QWidget) and obj.window() is self:
             self._on_outside_click(obj)
         return False
+
+    def _name_edited(self, item) -> None:
+        """A name typed into the cue list goes straight onto the cue."""
+        if self._refreshing or item.column() != NAME_COL:
+            return
+        row = item.row()
+        cues = self.show_model.cues
+        if not 0 <= row < len(cues):
+            return
+        cue = cues[row]
+        typed = item.text().strip()
+        if not typed or typed == cue.name:
+            item.setText(("    " if cue.parent else "") + cue.name)  # put back what it was
+            return
+        cue.name = typed
+        self._refresh_inspector()
+        self._refresh_now_label()
+        self._refresh_title()
 
     def _remember_selected_row(self) -> None:
         row = self._selected_row()
@@ -2596,7 +2638,13 @@ class MainWindow(QMainWindow):
                            (("lowshelf", cue.eq_low), ("peaking", cue.eq_mid),
                             ("highshelf", cue.eq_high)) if gain]
         rate = self.mixer.rate if self.mixer is not None else 48000
-        chain = fx.Chain(effects=cue.effects, rate=rate, channels=channels)
+        effects = list(cue.effects)
+        speed = cue.rate or 1.0
+        if cue.preserve_pitch and abs(speed - 1.0) > 1e-6:
+            # Playing faster raises the pitch, so shift it back down by the same amount.
+            semitones = -12 * math.log2(speed)
+            effects.append(dict(fx.new_effect("pitch"), semitones=semitones))
+        chain = fx.Chain(effects=effects, rate=rate, channels=channels)
         return None if chain.flat() else chain
 
     def _apply_levels(self, voice: Voice, cue: Cue, clip) -> None:
