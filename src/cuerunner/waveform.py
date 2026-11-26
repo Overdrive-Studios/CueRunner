@@ -92,11 +92,18 @@ class WaveformView(QWidget):
         self._slices: list[float] = []
         self._playhead = 0.0  # where the cue is up to, or where it was last clicked
 
-    def set_clip(self, path: str, duration_s: float) -> None:
-        self._peaks = peaks(path) if path else np.zeros((0, 2), dtype=np.float32)
+    def set_clip(self, path: str, duration_s: float, wave: bool = True) -> None:
+        """Show this file. wave=False skips reading peaks, for files that have no wave to read.
+
+        Handing a video file to the wave reader is at best wasted work and at worst a way
+        to upset a library that was never meant to open it.
+        """
+        self._peaks = peaks(path) if (path and wave) else np.zeros((0, 2), dtype=np.float32)
         self._duration = max(0.0, duration_s)
         if not path:
             self._message = "No audio file"
+        elif not wave:
+            self._message = "Video file"
         elif len(self._peaks) == 0:
             self._message = "No waveform for this file"
         else:

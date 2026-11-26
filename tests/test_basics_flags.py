@@ -102,17 +102,19 @@ def test_double_clicking_a_name_renames_the_cue(window):
     assert window.show_model.cues[0].name == "New name"
 
 
-def test_other_columns_cannot_be_typed_into(window):
-    from cuerunner.main import NAME_COL
+def test_the_worked_out_columns_cannot_be_typed_into(window):
+    """The cue list is typed into directly now, but only the columns that hold a value."""
+    from cuerunner.main import COLUMNS, EDITABLE_COLUMNS
     from cuerunner.model import Cue
 
     window.show_model.cues.append(Cue(number="1", name="Song", kind="memo"))
     window._refresh_table()
     for col in range(window.table.columnCount()):
         item = window.table.item(0, col)
-        if item is None or col == NAME_COL:
+        if item is None:
             continue
-        assert not (item.flags() & QtCore.Qt.ItemFlag.ItemIsEditable), col
+        editable = bool(item.flags() & QtCore.Qt.ItemFlag.ItemIsEditable)
+        assert editable == (COLUMNS[col] in EDITABLE_COLUMNS), COLUMNS[col]
 
 
 def test_clearing_a_name_puts_the_old_one_back(window):
