@@ -904,6 +904,8 @@ class MainWindow(QMainWindow):
         self._last_row = -1  # the last row that was highlighted; GO continues from it
         self._refreshing = False  # True while the table is being rebuilt, not edited
         self._problems: list[str] = []  # recent cue failures, newest last
+        self._panicking = False  # True while the panic fade is running
+        self._last_panic = 0.0  # when Escape was last pressed, for spotting a double tap
         self._alert_timer = QTimer(self)
         self._alert_timer.setSingleShot(True)
         self._alert_timer.timeout.connect(lambda: self.alert_label.setVisible(False))
@@ -916,7 +918,7 @@ class MainWindow(QMainWindow):
         go_key = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         go_key.activated.connect(self.go)
         panic_key = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
-        panic_key.activated.connect(self.panic)
+        panic_key.activated.connect(self._panic_pressed)
 
         self.clock_timer = QTimer(self)
         self.clock_timer.setInterval(100)
@@ -1149,6 +1151,7 @@ class MainWindow(QMainWindow):
         self.insp_wave.set_clip(cue.file if cue.kind == "audio" else "", seconds)
         self.insp_wave.set_markers(cue.loop_in, cue.loop_out)
         self.insp_wave.set_slices(cue.slices)
+        self.insp_wave.set_playhead(cue.trim_in)
 
     def _file_seconds(self, cue: Cue) -> float:
         """A cue's length from the file header, for cues that have not been probed yet."""
@@ -1175,6 +1178,31 @@ class MainWindow(QMainWindow):
             return
         cue.slices = []
         self.insp_wave.set_slices(cue.slices)
+
+    def _seek_selected_cue(self, seconds: float) -> None:
+        """Clicking the waveform jumps the cue to that point, if it is playing."""
+        cue = self._selected_cue()
+        if cue is None or self.mixer is None:
+            return
+        frame = int(max(0.0, seconds) * self.mixer.rate)
+        for voice in self._cue_voices:
+            if voice.tag is cue and not voice.done:
+                voice.position = min(frame, max(voice.clip.frames - 1, 0))
+                voice.natural_end = False
+
+    def _follow_playhead(self) -> None:
+        """While a cue plays, the waveform shows where it has got to."""
+        if not hasattr(self, "insp_wave") or self.insp_wave.is_dragging():
+            return
+        if self.insp_tabs.currentIndex() != INSPECTOR_TABS.index("Time & Loops"):
+            return
+        cue = self._selected_cue()
+        if cue is None or self.mixer is None:
+            return
+        for voice in self._cue_voices:
+            if voice.tag is cue and not voice.done and not voice.preloaded:
+                self.insp_wave.set_playhead(voice.position / self.mixer.rate)
+                return
 
     def _wave_markers_changed(self, loop_in: float, loop_out: float) -> None:
         """A marker was dragged: update the spin boxes, which write back to the cue."""
@@ -1635,7 +1663,7 @@ class MainWindow(QMainWindow):
         self.stop_button.setProperty("kind", "stop")
         self.pause_button = self._tool_button("Pause", "Pause or resume all sound", self.toggle_pause)
         self.pause_button.setProperty("kind", "pause")
-        self.panic_button = self._tool_button("Panic", "Stop everything now, with no fade (Esc)", self.panic)
+        self.panic_button = self._tool_button("Panic", "Fade everything out and stop (Esc; press twice to cut)", self._panic_pressed)
         self.panic_button.setProperty("kind", "panic")
         tools.addWidget(self.stop_button)
         tools.addWidget(self.pause_button)
@@ -2055,6 +2083,7 @@ class MainWindow(QMainWindow):
         self.insp_tabs.currentChanged.connect(self.insp_stack.setCurrentIndex)
         self.insp_tabs.currentChanged.connect(lambda _: self._refresh_waveform())
         self.insp_wave.markersChanged.connect(self._wave_markers_changed)
+        self.insp_wave.seeked.connect(self._seek_selected_cue)
         # The stack is as tall as its tallest page, so it is capped and scrolls instead of
         # pushing the cue list off a laptop screen.
         self.insp_scroll = QScrollArea()
@@ -2478,7 +2507,7 @@ class MainWindow(QMainWindow):
     def new_show(self) -> None:
         if not self.confirm_discard("starting a new show"):
             return
-        self.panic()
+        self.hard_stop()
         self.show_model = Show()
         self.show_path = None
         self._refresh_table()
@@ -2499,7 +2528,7 @@ class MainWindow(QMainWindow):
             return
         self.show_path = path
         launcher.remember_show(path)
-        self.panic()
+        self.hard_stop()
         self._refresh_table()
         for cue in self.show_model.cues:
             if cue.duration_ms == 0:
@@ -3255,6 +3284,35 @@ class MainWindow(QMainWindow):
         self.pause_button.setText("RESUME" if self.mixer.paused else "PAUSE")
 
     def panic(self) -> None:
+        """Fade everything out and stop, over the show's panic duration.
+
+        This is what Escape does, as QLab does it. Pressing it again while the fade is
+        running stops everything on the spot, and so does a double tap.
+        """
+        seconds = max(0.0, float(self.show_model.panic_duration))
+        if self._panicking or seconds <= 0 or self.mixer is None:
+            self.hard_stop()
+            return
+        self._panicking = True
+        for voice in self.mixer.voices():
+            self.mixer.fade_out(voice, seconds)
+        QTimer.singleShot(int(seconds * 1000) + 50, self._finish_panic)
+
+    def _panic_pressed(self) -> None:
+        """Escape fades everything out; two presses in quick succession cut it dead."""
+        now = time.monotonic()
+        double_tap = now - self._last_panic < 0.4
+        self._last_panic = now
+        if double_tap:
+            self.hard_stop()
+        else:
+            self.panic()
+
+    def _finish_panic(self) -> None:
+        if self._panicking:  # a double tap may already have stopped everything
+            self.hard_stop()
+
+    def hard_stop(self) -> None:
         """Stop everything immediately, with no fade, including pads."""
         self._pause_spotify()
         self._video.stop_all()
@@ -3268,6 +3326,7 @@ class MainWindow(QMainWindow):
             timer.stop()
         self._timers = []
         self._playing_cue = None
+        self._panicking = False
         self._radio = None
         self._radio_voice = None
         self.pause_button.setText("PAUSE")
@@ -3362,6 +3421,7 @@ class MainWindow(QMainWindow):
             self._fire_midi_trigger(self._midi_triggers.get_nowait())
         self._check_wall_clock()
         self._check_ducking()
+        self._follow_playhead()
         self._poll_timecode()
         if self._mic_chain is not None and self.mixer is not None:
             self.mixer.set_ducked(self._mic_chain.gate_open, self.show_model.duck_level)

@@ -72,6 +72,7 @@ class WaveformView(QWidget):
     """
 
     markersChanged = Signal(float, float)
+    seeked = Signal(float)  # a click in the body of the waveform, in seconds
     GRAB_PIXELS = 6  # how close a click must be to grab a marker
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -86,6 +87,7 @@ class WaveformView(QWidget):
         self._message = "No audio file"
         self._dragging = ""  # "in", "out" or "" while nothing is being dragged
         self._slices: list[float] = []
+        self._playhead = 0.0  # where the cue is up to, or where it was last clicked
 
     def set_clip(self, path: str, duration_s: float) -> None:
         self._peaks = peaks(path) if path else np.zeros((0, 2), dtype=np.float32)
@@ -97,6 +99,21 @@ class WaveformView(QWidget):
         else:
             self._message = ""
         self.update()
+
+    def set_playhead(self, seconds: float) -> None:
+        if abs(seconds - self._playhead) < 0.0005:
+            return
+        self._playhead = max(0.0, float(seconds))
+        self.update()
+
+    def playhead(self) -> float:
+        return self._playhead
+
+    @staticmethod
+    def time_label(seconds: float) -> str:
+        """mm:ss.mmm, as QLab writes the position above the waveform."""
+        minutes, rest = divmod(max(0.0, float(seconds)), 60)
+        return f"{int(minutes):02d}:{rest:06.3f}"
 
     def set_slices(self, slices: list) -> None:
         self._slices = [float(x) for x in (slices or [])]
@@ -202,6 +219,20 @@ class WaveformView(QWidget):
             painter.setPen(QPen(QColor("#f2c14e"), 2))
             painter.drawLine(QPointF(x, self.RULER), QPointF(x, self.height()))
 
+        # Where the cue is up to, with the time written on the scale above it.
+        head_x = self._x_for(self._playhead)
+        painter.setPen(QPen(QColor("#ffffff"), 1))
+        painter.drawLine(QPointF(head_x, self.RULER), QPointF(head_x, self.height()))
+        text = self.time_label(self._playhead)
+        font = QFont(painter.font())
+        font.setPointSize(8)
+        painter.setFont(font)
+        box_width = painter.fontMetrics().horizontalAdvance(text) + 6
+        box_x = min(max(head_x - box_width / 2, 0), max(width - box_width, 0))
+        painter.fillRect(int(box_x), 0, int(box_width), self.RULER, QColor("#d8c24a"))
+        painter.setPen(QColor("#1d1d20"))
+        painter.drawText(QPointF(box_x + 3, self.RULER - 3), text)
+
     # --- dragging -------------------------------------------------------
     def _grab(self, x: float) -> str:
         if abs(x - self._x_for(self._loop_in)) <= self.GRAB_PIXELS:
@@ -214,12 +245,15 @@ class WaveformView(QWidget):
         if not self.isEnabled() or not self.has_waveform():
             return
         x = event.position().x()
-        # Clicking away from both markers moves the nearer one, so a loop can be set in one go.
-        self._dragging = self._grab(x) or (
-            "in" if abs(x - self._x_for(self._loop_in)) <= abs(x - self._x_for(self._out_seconds()))
-            else "out"
-        )
-        self._move_to(x)
+        grabbed = self._grab(x)
+        if grabbed:
+            self._dragging = grabbed
+            self._move_to(x)
+            return
+        # Anywhere else moves the playhead to that point in the file, as QLab does.
+        self._dragging = ""
+        self.set_playhead(self._seconds_for(x))
+        self.seeked.emit(self._playhead)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt naming
         if self._dragging:

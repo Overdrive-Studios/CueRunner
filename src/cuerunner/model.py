@@ -181,6 +181,7 @@ class Show:
     radio: RadioSettings = field(default_factory=RadioSettings)
     audio_patches: list[AudioPatch] = field(default_factory=_default_patches)
     midi_map: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MIDI_MAP))
+    panic_duration: float = 1.0  # seconds that Panic takes to fade everything out
     duck_level: float = DEFAULT_DUCK_LEVEL  # music level while the talkback mic is open, 0 to 1
     remote_port: int = DEFAULT_REMOTE_PORT
     spotify_client_id: str = ""  # from the Spotify developer app; not a secret when using PKCE
@@ -225,6 +226,7 @@ class Show:
             "radio": asdict(self.radio),
             "audio_patches": [asdict(p) for p in self.audio_patches],
             "midi_map": dict(self.midi_map),
+            "panic_duration": self.panic_duration,
             "duck_level": self.duck_level,
             "remote_port": self.remote_port,
             "spotify_client_id": self.spotify_client_id,
@@ -262,7 +264,12 @@ class Show:
             duck_level = min(1.0, max(0.0, float(data.get("duck_level", DEFAULT_DUCK_LEVEL))))
         except (TypeError, ValueError):
             duck_level = DEFAULT_DUCK_LEVEL
+        try:
+            panic_duration = max(0.0, min(60.0, float(data.get("panic_duration", 1.0))))
+        except (TypeError, ValueError):
+            panic_duration = 1.0
         return cls(
+            panic_duration=panic_duration,
             name=data.get("name", "Untitled Show"),
             cues=cues,
             pads=pads,

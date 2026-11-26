@@ -84,21 +84,39 @@ def ready_view(wav, width=400):
     return view
 
 
-def test_dragging_sets_the_loop_in_point(app, wav):
+def test_clicking_the_waveform_moves_the_playhead_there(app, wav):
+    """Clicking in the body jumps to that point in the file, as QLab does."""
     view = ready_view(wav)
     seen = []
-    view.markersChanged.connect(lambda a, b: seen.append((a, b)))
+    view.seeked.connect(seen.append)
     click(view, 100)  # a quarter of the way along four seconds
-    assert view.markers()[0] == pytest.approx(1.0, abs=0.02)
-    assert seen and seen[-1][0] == pytest.approx(1.0, abs=0.02)
+    assert view.playhead() == pytest.approx(1.0, abs=0.02)
+    assert seen and seen[-1] == pytest.approx(1.0, abs=0.02)
+    assert view.markers() == (0.0, 0.0)  # the loop points are left alone
 
 
-def test_dragging_the_out_marker_stores_zero_at_the_very_end(app, wav):
+def test_dragging_a_loop_marker_moves_it(app, wav):
     view = ready_view(wav)
-    click(view, 300)  # nearer the end, so this grabs the out marker
-    assert view.markers()[1] == pytest.approx(3.0, abs=0.02)
-    click(view, 399)  # back to the end of the file
+    view.set_markers(1.0, 3.0)
+    seen = []
+    view.markersChanged.connect(lambda a, b: seen.append((a, b)))
+    click(view, view._x_for(1.0))  # take hold of the in marker itself
+    click(view, 150, QEvent.Type.MouseMove)
+    assert view.markers()[0] == pytest.approx(1.5, abs=0.05)
+    assert seen
+
+
+def test_dragging_the_out_marker_to_the_end_stores_zero(app, wav):
+    view = ready_view(wav)
+    view.set_markers(0.0, 3.0)
+    click(view, view._x_for(3.0))   # grab the out marker
+    click(view, 399, QEvent.Type.MouseMove)  # drag it to the end of the file
     assert view.markers()[1] == 0.0  # 0 means "play to the end", as cues store it
+
+
+def test_the_playhead_time_is_written_the_way_qlab_writes_it(app, wav):
+    assert waveform.WaveformView.time_label(73.72) == "01:13.720"
+    assert waveform.WaveformView.time_label(0) == "00:00.000"
 
 
 def test_the_loop_points_cannot_cross(app, wav):
