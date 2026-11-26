@@ -61,7 +61,10 @@ class Soundboard(QWidget):
 
     def refresh(self) -> None:
         for slot, button in enumerate(self.buttons):
-            pad = self._pads[self._index(slot)] if self._pads else Pad()
+            index = self._index(slot)
+            # A show file may carry fewer pads than a bank holds, so show an empty one
+            # rather than running off the end of the list.
+            pad = self._pads[index] if 0 <= index < len(self._pads) else Pad()
             button.setText(pad.name or "-")
             button.setToolTip(pad.file or "Right-click to assign a file")
 

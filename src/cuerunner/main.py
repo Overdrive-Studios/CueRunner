@@ -70,7 +70,7 @@ from cuerunner.engine import (
     probe_duration_ms,
     route_matrix,
 )
-from cuerunner.model import AudioPatch, Cue, Pad, RadioSettings, Show
+from cuerunner.model import PAD_COUNT, AudioPatch, Cue, Pad, RadioSettings, Show
 from cuerunner.playlist import Playlist, scan_audio
 import math
 import queue
@@ -154,6 +154,10 @@ QTableWidget {
     background: #424246; alternate-background-color: #3a3a3e; color: #ececf0;
     border: 1px solid #2e2e32; gridline-color: #2e2e32; selection-background-color: #3b82d6;
     selection-color: #ffffff; font-size: 13px;
+}
+QLabel#alert {
+    background: #7a2520; color: #ffe9e7; border: 1px solid #a2342c;
+    border-radius: 4px; padding: 6px 10px; font-size: 13px;
 }
 QTableWidget::item:selected, QTableWidget::item:selected:!active {
     background: #3b82d6; color: #ffffff;
@@ -826,6 +830,10 @@ class MainWindow(QMainWindow):
         self._build_menus()
         self._last_row = -1  # the last row that was highlighted; GO continues from it
         self._refreshing = False  # True while the table is being rebuilt, not edited
+        self._problems: list[str] = []  # recent cue failures, newest last
+        self._alert_timer = QTimer(self)
+        self._alert_timer.setSingleShot(True)
+        self._alert_timer.timeout.connect(lambda: self.alert_label.setVisible(False))
         self._quitting = False  # guards against the quit being handled twice
         self._build_central()
         self.setAcceptDrops(True)  # drop audio, video or MIDI files onto the window to add cues
@@ -1475,6 +1483,12 @@ class MainWindow(QMainWindow):
         self.now_label = QLabel("[no cue on standby]")
         self.now_label.setObjectName("standby")
         screens.addWidget(self.now_label)
+        # Problems during a show appear here rather than in a dialog, so nothing blocks.
+        self.alert_label = QLabel("")
+        self.alert_label.setObjectName("alert")
+        self.alert_label.setWordWrap(True)
+        self.alert_label.setVisible(False)
+        screens.addWidget(self.alert_label)
         clock = QFrame()
         clock.setObjectName("clockBar")
         clock_row = QHBoxLayout(clock)
@@ -2210,6 +2224,27 @@ class MainWindow(QMainWindow):
             self._on_outside_click(obj)
         return False
 
+    def _cue_problem(self, title: str, detail: str = "", modal_when_editing: bool = True) -> None:
+        """A cue could not run.
+
+        In Show mode a dialog would freeze the show until somebody clicked it, so the
+        message goes to the banner and the show carries on. In Edit mode, where cues are
+        being set up and nothing is running, it is shown as a dialog so it is not missed.
+        """
+        line = " ".join(str(detail).split())
+        self._problems.append(f"{title}: {line}")
+        del self._problems[:-50]
+        if self._editing and modal_when_editing:
+            QMessageBox.warning(self, title, str(detail))
+            return
+        self.alert_label.setText(f"\u26a0  {title} \u2014 {line}")
+        self.alert_label.setVisible(True)
+        self._alert_timer.start(8000)
+
+    def recent_problems(self) -> list[str]:
+        """What has gone wrong lately, newest last."""
+        return list(self._problems)
+
     def _name_edited(self, item) -> None:
         """A name typed into the cue list goes straight onto the cue."""
         if self._refreshing or item.column() != NAME_COL:
@@ -2268,7 +2303,7 @@ class MainWindow(QMainWindow):
     def open_show_path(self, path: Path) -> None:
         try:
             self.show_model = Show.load(path)
-        except (OSError, ValueError) as exc:
+        except Exception as exc:  # a show file can be anything the user points us at
             QMessageBox.critical(self, "Could not open show", str(exc))
             return
         self.show_path = path
@@ -2365,17 +2400,17 @@ class MainWindow(QMainWindow):
     def _send_console_cue(self, cue: Cue) -> None:
         sender = self._console_for(self.show_model.console_host)
         if sender is None:
-            QMessageBox.warning(self, "Console cue", "Set the console's IP address under Audio → Allen & Heath Console first.")
+            self._cue_problem("Console cue", "Set the console's IP address under Audio → Allen & Heath Console first.")
             return
         try:
             data = allenheath.parse_command(self.show_model.console_family, cue.file, channel=1)
         except ValueError as exc:
-            QMessageBox.warning(self, "Console cue", f"{cue.name}\n\n{exc}")
+            self._cue_problem("Console cue", f"{cue.name}\n\n{exc}")
             return
         spotify_ui.run_async(
             self,
             lambda: sender.send(data),
-            lambda _r, error: QMessageBox.warning(self, "Console cue", f"{cue.name}\n\n{error}") if error is not None else None,
+            lambda _r, error: self._cue_problem("Console cue", f"{cue.name}\n\n{error}") if error is not None else None,
         )
 
     def add_spotify_cue(self) -> None:
@@ -2537,7 +2572,7 @@ class MainWindow(QMainWindow):
         cues = self.show_model.cues
         target_row = next((i for i, c in enumerate(cues) if c.number == number), None)
         if target_row is None:
-            QMessageBox.warning(self, "Cannot run cue", f"{cue.name}\n\nThere is no cue numbered \"{number}\".")
+            self._cue_problem("Cannot run cue", f"{cue.name}\n\nThere is no cue numbered \"{number}\".")
             return
         target = cues[target_row]
         if cue.action == "stop":
@@ -2851,20 +2886,20 @@ class MainWindow(QMainWindow):
             return
         if cue.kind == "video":
             if not cue.file:
-                QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\nThis video cue has no file.")
+                self._cue_problem("Cannot play cue", f"{cue.name}\n\nThis video cue has no file.")
             else:
                 try:
                     self._video.play(cue.video_output, cue.file, self.show_model.video_routes, cue.number)
                     self._video.set_opacity(cue.video_output, cue.opacity, self.show_model.video_routes)
                 except Exception as exc:
-                    QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
+                    self._cue_problem("Cannot play cue", f"{cue.name}\n\n{exc}")
             self.table.selectRow(min(row + 1, len(cues) - 1))
             return
         if cue.kind == "camera":
             try:
                 self._video.show_camera(cue.video_output, self._camera_for(cue), self.show_model.video_routes)
             except Exception as exc:
-                QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
+                self._cue_problem("Cannot play cue", f"{cue.name}\n\n{exc}")
             self.table.selectRow(min(row + 1, len(cues) - 1))
             return
         if cue.kind == "memo":
@@ -2878,35 +2913,35 @@ class MainWindow(QMainWindow):
             try:
                 netsend.send(cue.protocol, cue.target, cue.text)
             except Exception as exc:
-                QMessageBox.warning(self, "Cannot send network cue", f"{cue.name}\n\n{exc}")
+                self._cue_problem("Cannot send network cue", f"{cue.name}\n\n{exc}")
             self._finish(row)
             return
         if cue.kind == "midi":
             try:
                 midi.send_out(cue.target, cue.text)
             except Exception as exc:
-                QMessageBox.warning(self, "Cannot send MIDI cue", f"{cue.name}\n\n{exc}")
+                self._cue_problem("Cannot send MIDI cue", f"{cue.name}\n\n{exc}")
             self._finish(row)
             return
         if cue.kind == "timecode":
             try:
                 self._start_timecode(cue)
             except Exception as exc:
-                QMessageBox.warning(self, "Cannot start timecode", f"{cue.name}\n\n{exc}")
+                self._cue_problem("Cannot start timecode", f"{cue.name}\n\n{exc}")
             self._finish(row)
             return
         if cue.kind == "light":
             try:
                 self._run_light(cue)
             except Exception as exc:
-                QMessageBox.warning(self, "Cannot send light cue", f"{cue.name}\n\n{exc}")
+                self._cue_problem("Cannot send light cue", f"{cue.name}\n\n{exc}")
             self._finish(row)
             return
         if cue.kind == "osc":
             try:
                 osc.send(cue.target, cue.text)
             except Exception as exc:
-                QMessageBox.warning(self, "Cannot send OSC", f"{cue.name}\n\n{exc}")
+                self._cue_problem("Cannot send OSC", f"{cue.name}\n\n{exc}")
             self._finish(row)
             return
         if cue.kind == "wait":
@@ -2936,7 +2971,7 @@ class MainWindow(QMainWindow):
             try:
                 self._video.show_text(cue.video_output, cue.text, cue.font_size, self.show_model.video_routes)
             except Exception as exc:
-                QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
+                self._cue_problem("Cannot play cue", f"{cue.name}\n\n{exc}")
             self._finish(row)
             return
         if cue.kind == "fade":
@@ -2951,21 +2986,21 @@ class MainWindow(QMainWindow):
             try:
                 self._start_midifile(cue)
             except Exception as exc:
-                QMessageBox.warning(self, "Cannot play MIDI file", f"{cue.name}\n\n{exc}")
+                self._cue_problem("Cannot play MIDI file", f"{cue.name}\n\n{exc}")
             self._finish(row)
             return
         if cue.kind == "program":
             try:
                 self._run_program(cue)
             except Exception as exc:
-                QMessageBox.warning(self, "Cannot run program", f"{cue.name}\n\n{exc}")
+                self._cue_problem("Cannot run program", f"{cue.name}\n\n{exc}")
             self._finish(row)
             return
         if cue.kind == "target":
             try:
                 self._retarget_cue(cue)
             except Exception as exc:
-                QMessageBox.warning(self, "Cannot change target", f"{cue.name}\n\n{exc}")
+                self._cue_problem("Cannot change target", f"{cue.name}\n\n{exc}")
             self._finish(row)
             return
         if self.mixer is None:
@@ -2974,7 +3009,7 @@ class MainWindow(QMainWindow):
             try:
                 clip = self._clip(cue.file)
             except Exception as exc:
-                QMessageBox.warning(self, "Cannot play cue", f"{cue.name}\n\n{exc}")
+                self._cue_problem("Cannot play cue", f"{cue.name}\n\n{exc}")
                 return
             ready = next((v for v in self._cue_voices if v.tag is cue and v.preloaded and not v.done), None)
             if ready is not None:
@@ -3046,19 +3081,37 @@ class MainWindow(QMainWindow):
 
     # --- Soundboard ---------------------------------------------------
 
+    def _grow_pads(self, index: int) -> bool:
+        """Make room up to this slot, so a show with few pads can still have one assigned."""
+        if index < 0 or index >= PAD_COUNT:
+            return False
+        pads = self.show_model.pads
+        while len(pads) <= index:
+            pads.append(Pad())
+        return True
+
+    def _pad_at(self, index: int):
+        """The pad at this slot, or None when the show has fewer pads than the board shows."""
+        pads = self.show_model.pads
+        return pads[index] if 0 <= index < len(pads) else None
+
     def _on_pad_pressed(self, index: int) -> None:
-        pad = self.show_model.pads[index]
+        pad = self._pad_at(index)
+        if pad is None:
+            return
         if not pad.file or self.mixer is None:
             return
         try:
             clip = self._clip(pad.file)
         except Exception as exc:
-            QMessageBox.warning(self, "Cannot play pad", f"{pad.name}\n\n{exc}")
+            self._cue_problem("Cannot play pad", f"{pad.name}\n\n{exc}")
             return
         self.mixer.add(Voice(clip=clip, matrix=route_matrix(pad.route, clip.channels, self.mixer.out_channels)))
 
     def _pad_routing(self, index: int) -> None:
-        pad = self.show_model.pads[index]
+        pad = self._pad_at(index)
+        if pad is None:
+            return
         out = self.mixer.out_channels if self.mixer is not None else 2
         dialog = RoutingDialog(pad.route, out, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -3068,10 +3121,14 @@ class MainWindow(QMainWindow):
         filename, _ = QFileDialog.getOpenFileName(self, "Assign pad", "", AUDIO_FILTER)
         if not filename:
             return
+        if not self._grow_pads(index):
+            return
         self.show_model.pads[index] = Pad(name=Path(filename).stem, file=filename)
         self.soundboard.set_pads(self.show_model.pads)
 
     def _clear_pad(self, index: int) -> None:
+        if not self._grow_pads(index):
+            return
         self.show_model.pads[index] = Pad()
         self.soundboard.set_pads(self.show_model.pads)
 
@@ -3548,7 +3605,7 @@ class MainWindow(QMainWindow):
         try:
             clip = self._clip(path)
         except Exception as exc:
-            QMessageBox.warning(self, "Venue Radio", f"Could not play {Path(path).name}:\n{exc}")
+            self._cue_problem("Venue Radio", modal_when_editing=False, detail=f"Could not play {Path(path).name}:\n{exc}")
             self.stop_radio()
             return
         voice = Voice(clip=clip, matrix=route_matrix(self.show_model.radio.route, clip.channels, self.mixer.out_channels), bed=True, tag=kind)
