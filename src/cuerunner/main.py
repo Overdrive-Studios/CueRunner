@@ -99,6 +99,7 @@ from cuerunner.remote import RemoteServer, RemoteState, lan_ip
 from cuerunner.soundboard import Soundboard
 from cuerunner.theme import apply_dark_theme
 from cuerunner.timecode import format_clock, format_duration, format_hms
+from cuerunner import video_probe
 from cuerunner.timeline_view import TimelineView
 from cuerunner.version import __version__
 
@@ -937,6 +938,8 @@ class MainWindow(QMainWindow):
         self._timecode_runs: dict[int, tuple] = {}  # id(cue) -> (cue, generator, timer, port)
         self._dmx_last: dict[tuple[str, int], dict[int, int]] = {}
         self._video = video_out.VideoOutputs(self)
+        self._video_probe = video_probe.DurationProbe(self)
+        self._video_probe.ready.connect(self._video_duration_known)
         self._playing_cue: Cue | None = None
         self._row_bars: list[QProgressBar] = []
         self.mixer: Mixer | None = None
@@ -1008,6 +1011,7 @@ class MainWindow(QMainWindow):
         self._stop_timecode()
         self._stop_midifile()
         self._video.close()
+        self._video_probe.close()
         super().closeEvent(event)
 
     def _fit_to_screen(self) -> None:
@@ -1264,14 +1268,22 @@ class MainWindow(QMainWindow):
             self.insp_wave.set_clip("", 0.0)
             return
         seconds = cue.duration_ms / 1000 if cue.duration_ms else self._file_seconds(cue)
-        self.insp_wave.set_clip(cue.file if cue.kind == "audio" else "", seconds)
+        # Video files go in too. Their wave usually cannot be read, but with the length
+        # known the scale and the start and end markers still work, which is the point.
+        self.insp_wave.set_clip(cue.file if cue.kind in ("audio", "video") else "", seconds)
         self.insp_wave.set_markers(cue.loop_in, cue.loop_out)
+        self.insp_wave.set_range(cue.trim_in, cue.trim_out)
         self.insp_wave.set_slices(cue.slices)
         self.insp_wave.set_playhead(cue.trim_in)
 
     def _file_seconds(self, cue: Cue) -> float:
-        """A cue's length from the file header, for cues that have not been probed yet."""
-        if cue.kind != "audio" or not cue.file:
+        """A cue's length from the file, for cues that have not been probed yet."""
+        if not cue.file:
+            return 0.0
+        if cue.kind == "video":
+            known = self._video_probe.request(cue.file)
+            return (known or 0) / 1000
+        if cue.kind != "audio":
             return 0.0
         try:
             return probe_duration_ms(cue.file) / 1000
@@ -1294,6 +1306,20 @@ class MainWindow(QMainWindow):
             return
         cue.slices = []
         self.insp_wave.set_slices(cue.slices)
+
+    def _wave_range_changed(self, start: float, end: float) -> None:
+        """Dragging the green markers sets where the cue starts and ends in the file."""
+        cue = self._selected_cue()
+        if cue is None or not self._editing:
+            return
+        self._remember("Start and End", coalesce=True)
+        cue.trim_in, cue.trim_out = round(start, 3), round(end, 3)
+        for box, value in ((self.insp_start_time, cue.trim_in),
+                           (self.insp_end_time, cue.trim_out)):
+            box.blockSignals(True)
+            box.setValue(value)
+            box.blockSignals(False)
+        self._refresh_table()
 
     def _seek_selected_cue(self, seconds: float) -> None:
         """Clicking the waveform jumps the cue to that point, if it is playing."""
@@ -2284,6 +2310,7 @@ class MainWindow(QMainWindow):
             lambda: self._remember("Timeline Edit", coalesce=True))
         self.insp_timeline.changed.connect(self._timeline_changed)
         self.insp_wave.markersChanged.connect(self._wave_markers_changed)
+        self.insp_wave.rangeChanged.connect(self._wave_range_changed)
         self.insp_wave.seeked.connect(self._seek_selected_cue)
         # The stack is as tall as its tallest page, so it is capped and scrolls instead of
         # pushing the cue list off a laptop screen.
@@ -3510,12 +3537,32 @@ class MainWindow(QMainWindow):
         self._refresh_table()
 
     def _probe_duration(self, cue: Cue) -> None:
-        if cue.kind != "audio" or not cue.file:
+        """Fill in how long a cue's file is, so the Length column and the scale are right."""
+        if not cue.file:
+            return
+        if cue.kind == "video":
+            # The media engine answers in its own time, so this comes back later.
+            known = self._video_probe.request(cue.file)
+            if known is not None:
+                cue.duration_ms = known
+            return
+        if cue.kind != "audio":
             return
         try:
             cue.duration_ms = probe_duration_ms(cue.file)
         except Exception:
             cue.duration_ms = 0
+
+    def _video_duration_known(self, path: str, duration_ms: int) -> None:
+        """A video's length has come back: put it on every cue that uses that file."""
+        changed = False
+        for cue in self.show_model.all_cues():
+            if cue.kind == "video" and cue.file == path and cue.duration_ms != duration_ms:
+                cue.duration_ms = duration_ms
+                changed = True
+        if changed:
+            self._refresh_table()
+            self._refresh_waveform()
 
     def edit_row(self, row: int) -> None:
         if not self._editing or not 0 <= row < len(self.show_model.cues):
@@ -3592,7 +3639,13 @@ class MainWindow(QMainWindow):
                 self._cue_problem("Cannot play cue", f"{cue.name}\n\nThis video cue has no file.")
             else:
                 try:
-                    self._video.play(cue.video_output, cue.file, self.show_model.video_routes, cue.number)
+                    self._video.play(
+                        cue.video_output, cue.file, self.show_model.video_routes, cue.number,
+                        start=cue.trim_in, end=cue.trim_out,
+                        volume=max(0.0, cue.volume) * fx.db_to_gain(cue.trim_db),
+                        rate=cue.rate or 1.0,
+                        loops=0 if cue.loop else max(1, cue.play_count),
+                    )
                     self._video.set_opacity(cue.video_output, cue.opacity, self.show_model.video_routes)
                 except Exception as exc:
                     self._cue_problem("Cannot play cue", f"{cue.name}\n\n{exc}")
