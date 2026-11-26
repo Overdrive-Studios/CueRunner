@@ -4,7 +4,8 @@ from cuerunner.model import PAD_COUNT, Cue, Pad, RadioSettings, Show
 
 
 def test_save_and_load_round_trip(tmp_path: Path) -> None:
-    show = Show(name="Test", cues=[Cue(number="1", name="Intro", file="/music/intro.wav", fade_out=2.5, then="follow")])
+    show = Show(name="Test")
+    show.cues.append(Cue(number="1", name="Intro", file="/music/intro.wav", fade_out=2.5, then="follow"))
     show.pads[0] = Pad(name="Applause", file="/sfx/applause.wav")
     path = tmp_path / "show.cuerunner.json"
 
@@ -25,7 +26,8 @@ def test_loading_old_show_without_pads_gives_empty_pads(tmp_path: Path) -> None:
 
 
 def test_next_number_follows_highest_cue() -> None:
-    show = Show(cues=[Cue(number="1", name="a"), Cue(number="7", name="b")])
+    show = Show()
+    show.cues.extend([Cue(number="1", name="a"), Cue(number="7", name="b")])
     assert show.next_number() == "8"
 
 

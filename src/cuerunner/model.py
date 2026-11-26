@@ -173,10 +173,36 @@ def _empty_pads() -> list[Pad]:
     return [Pad() for _ in range(PAD_COUNT)]
 
 
+# A cart is a grid of cues with no playhead and no order, meant for firing things as
+# and when you want them. A list is the ordinary ordered cue list.
+LIST_KINDS = ("list", "cart")
+CART_COLUMNS = 8
+CART_ROWS = 4
+
+
+@dataclass
+class CueList:
+    """One cue list or cue cart in a show."""
+
+    name: str = "Main Cue List"
+    kind: str = "list"
+    cues: list[Cue] = field(default_factory=list)
+    columns: int = CART_COLUMNS  # carts only
+    rows: int = CART_ROWS  # carts only
+
+    def is_cart(self) -> bool:
+        return self.kind == "cart"
+
+
+def _default_lists() -> list[CueList]:
+    return [CueList()]
+
+
 @dataclass
 class Show:
     name: str = "Untitled Show"
-    cues: list[Cue] = field(default_factory=list)
+    cue_lists: list[CueList] = field(default_factory=_default_lists)
+    active_list: int = 0
     pads: list[Pad] = field(default_factory=_empty_pads)
     radio: RadioSettings = field(default_factory=RadioSettings)
     audio_patches: list[AudioPatch] = field(default_factory=_default_patches)
@@ -217,11 +243,43 @@ class Show:
         except OSError:
             return None
 
+    @property
+    def lists(self) -> list[CueList]:
+        """Never empty: a show always has somewhere to put cues."""
+        if not self.cue_lists:
+            self.cue_lists = _default_lists()
+        return self.cue_lists
+
+    @property
+    def current(self) -> CueList:
+        lists = self.lists
+        if not 0 <= self.active_list < len(lists):
+            self.active_list = 0
+        return lists[self.active_list]
+
+    @property
+    def cues(self) -> list[Cue]:
+        """The cues of whichever list or cart is showing."""
+        return self.current.cues
+
+    @cues.setter
+    def cues(self, value: list) -> None:
+        self.current.cues = list(value)
+
+    def all_cues(self):
+        """Every cue in the show, whichever list or cart it sits in."""
+        return [cue for entry in self.lists for cue in entry.cues]
+
     def to_json(self) -> str:
         data = {
             "format_version": FORMAT_VERSION,
             "name": self.name,
-            "cues": [asdict(c) for c in self.cues],
+            "cue_lists": [{"name": e.name, "kind": e.kind, "columns": e.columns,
+                           "rows": e.rows, "cues": [asdict(c) for c in e.cues]}
+                          for e in self.lists],
+            "active_list": self.active_list,
+            # Older builds only know this key, so the first list is written there too.
+            "cues": [asdict(c) for c in self.lists[0].cues],
             "pads": [asdict(p) for p in self.pads],
             "radio": asdict(self.radio),
             "audio_patches": [asdict(p) for p in self.audio_patches],
@@ -248,8 +306,25 @@ class Show:
         radio_fields = set(RadioSettings.__dataclass_fields__)
         # A show written by another version, or edited by hand, may hold entries that do
         # not fit. Those are passed over so the rest of the show still opens.
-        cues = [cue for cue in (_build(Cue, c, cue_fields) for c in _entries(data, "cues"))
-                if cue is not None]
+        def cues_from(raw) -> list:
+            return [cue for cue in (_build(Cue, c, cue_fields) for c in _entries(raw, "cues"))
+                    if cue is not None]
+
+        cue_lists = []
+        for raw in _entries(data, "cue_lists"):
+            kind = raw.get("kind") if raw.get("kind") in LIST_KINDS else "list"
+            cue_lists.append(CueList(
+                name=str(raw.get("name") or "Cue List"),
+                kind=kind,
+                cues=cues_from(raw),
+                columns=max(1, int(raw.get("columns", CART_COLUMNS) or CART_COLUMNS)),
+                rows=max(1, int(raw.get("rows", CART_ROWS) or CART_ROWS)),
+            ))
+        if not cue_lists:
+            # A show from before lists existed: everything goes in one list.
+            cue_lists = [CueList(cues=cues_from(data))]
+        active = data.get("active_list", 0)
+        active = active if isinstance(active, int) and 0 <= active < len(cue_lists) else 0
         pads = [pad for pad in (_build(Pad, p, pad_fields) for p in _entries(data, "pads"))
                 if pad is not None]
         pads = (pads + _empty_pads())[:PAD_COUNT]
@@ -271,7 +346,8 @@ class Show:
         return cls(
             panic_duration=panic_duration,
             name=data.get("name", "Untitled Show"),
-            cues=cues,
+            cue_lists=cue_lists,
+            active_list=active,
             pads=pads,
             radio=radio,
             audio_patches=patches or _default_patches(),

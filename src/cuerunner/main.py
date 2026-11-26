@@ -73,7 +73,8 @@ from cuerunner.engine import (
     probe_duration_ms,
     route_matrix,
 )
-from cuerunner.model import PAD_COUNT, AudioPatch, Cue, Pad, RadioSettings, Show
+from cuerunner.cart_view import CartView
+from cuerunner.model import PAD_COUNT, AudioPatch, Cue, CueList, Pad, RadioSettings, Show
 from cuerunner.playlist import Playlist, scan_audio
 import math
 import queue
@@ -226,6 +227,14 @@ QLabel#alert {
     background: #7a2520; color: #ffe9e7; border: 1px solid #a2342c;
     border-radius: 4px; padding: 6px 10px; font-size: 13px;
 }
+QPushButton#cartCell {
+    background: #35353a; color: #d6d6de; border: 1px solid #2a2a2e; border-radius: 5px;
+    font-size: 12px; padding: 4px;
+}
+QPushButton#cartCell:disabled { background: #303034; border-color: #2a2a2e; color: #55555c; }
+QPushButton#cartCell[filled="true"] { background: #44444c; color: #ffffff; }
+QPushButton#cartCell:checked { background: #3b82d6; color: #ffffff; border-color: #5a9ae6; }
+QListWidget#listSidebar { background: #2e2e32; border: 1px solid #27272b; }
 QTableWidget::item:selected, QTableWidget::item:selected:!active {
     background: #3b82d6; color: #ffffff;
 }
@@ -1706,7 +1715,41 @@ class MainWindow(QMainWindow):
         self.table.itemSelectionChanged.connect(self._refresh_now_label)
         self.table.itemSelectionChanged.connect(self._refresh_inspector)
         self.table.setMinimumHeight(140)  # the cue list keeps its room; the inspector scrolls instead
-        layout.addWidget(self.table, 1)
+
+        self.list_sidebar = QListWidget()
+        self.list_sidebar.setObjectName("listSidebar")
+        self.list_sidebar.setMaximumWidth(170)
+        self.list_sidebar.currentRowChanged.connect(self._choose_list)
+        new_list = QPushButton("New List")
+        new_cart = QPushButton("New Cart")
+        new_list.clicked.connect(lambda: self.add_cue_list("list"))
+        new_cart.clicked.connect(lambda: self.add_cue_list("cart"))
+        delete_list = QPushButton("Delete")
+        delete_list.clicked.connect(self.remove_cue_list)
+        side = QVBoxLayout()
+        side.setContentsMargins(0, 0, 0, 0)
+        side.setSpacing(4)
+        side.addWidget(self.list_sidebar, 1)
+        side.addWidget(new_list)
+        side.addWidget(new_cart)
+        side.addWidget(delete_list)
+        self.sidebar_panel = QWidget()
+        self.sidebar_panel.setLayout(side)
+        self.sidebar_panel.setMaximumWidth(170)
+
+        self.cart = CartView()
+        self.cart.selected.connect(lambda _: self._refresh_inspector())
+        self.cart.triggered.connect(self._go_cart_cue)
+        self.cue_area = QStackedWidget()
+        self.cue_area.addWidget(self.table)
+        self.cue_area.addWidget(self.cart)
+
+        middle = QHBoxLayout()
+        middle.setContentsMargins(0, 0, 0, 0)
+        middle.setSpacing(6)
+        middle.addWidget(self.sidebar_panel)
+        middle.addWidget(self.cue_area, 1)
+        layout.addLayout(middle, 1)
 
         # QLab-style inspector: a tab row, and the Basics form for the selected cue.
         # Fields apply straight away in Edit mode; Full Edit opens the complete cue dialog.
@@ -2246,7 +2289,12 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_saved_json"):
             self._refresh_title()  # the title carries a dot while there is unsaved work
         if hasattr(self, "cue_count_label"):
-            self.cue_count_label.setText(f"{len(cues)} cue{'' if len(cues) == 1 else 's'} in 1 list")
+            # The whole show, as QLab counts it, not just the list on screen.
+            total = len(self.show_model.all_cues())
+            places = len(self.show_model.lists)
+            self.cue_count_label.setText(
+                f"{total} cue{'' if total == 1 else 's'} in "
+                f"{places} list{'' if places == 1 else 's'}")
         playhead = self._playhead_row()
         playing_row = self._row_of(self._playing_cue)
         if 0 <= playhead < len(cues) and cues[playhead].auto_load:
@@ -2298,6 +2346,7 @@ class MainWindow(QMainWindow):
             self._row_bars.append(bar)
 
         self.table.setVerticalHeaderLabels([str(i + 1) for i in range(len(cues))])
+        self._refresh_lists()
         total_ms = sum(c.duration_ms for c in cues)
         self.trt_label.setText(format_hms(total_ms))
         self.soundboard.set_pads(self.show_model.pads)
@@ -2330,11 +2379,79 @@ class MainWindow(QMainWindow):
             self._shortcuts.append(shortcut)
 
     def _selected_row(self) -> int:
+        if self.showing_cart():
+            return self.cart.selected_index()
         rows = self.table.selectionModel().selectedRows()
         return rows[0].row() if rows else -1
 
+    def showing_cart(self) -> bool:
+        return hasattr(self, "cart") and self.show_model.current.is_cart()
+
+    def _go_cart_cue(self, index: int) -> None:
+        """A cart has no playhead, so starting a cue does not move anything on."""
+        self.go_row(index)
+
+    def _refresh_lists(self) -> None:
+        """Rebuild the sidebar and show whichever list or cart is active."""
+        if not hasattr(self, "list_sidebar"):
+            return
+        blocked = self.list_sidebar.blockSignals(True)
+        self.list_sidebar.clear()
+        for entry in self.show_model.lists:
+            mark = "\u25a6" if entry.is_cart() else "\u2630"
+            self.list_sidebar.addItem(f"{mark}  {entry.name}")
+        self.list_sidebar.setCurrentRow(self.show_model.active_list)
+        self.list_sidebar.blockSignals(blocked)
+        cart = self.show_model.current.is_cart()
+        self.cue_area.setCurrentWidget(self.cart if cart else self.table)
+        if cart:
+            entry = self.show_model.current
+            self.cart.set_shape(entry.columns, entry.rows)
+            self.cart.set_cues(entry.cues)
+
+    def _choose_list(self, row: int) -> None:
+        if not 0 <= row < len(self.show_model.lists) or row == self.show_model.active_list:
+            return
+        self.show_model.active_list = row
+        self._last_row = -1
+        self._refresh_table()
+
+    def add_cue_list(self, kind: str = "list") -> None:
+        """Add a cue list or a cue cart and switch to it."""
+        self._remember("Add Cart" if kind == "cart" else "Add List")
+        existing = len(self.show_model.lists)
+        name = f"Cue Cart {existing + 1}" if kind == "cart" else f"Cue List {existing + 1}"
+        self.show_model.cue_lists.append(CueList(name=name, kind=kind))
+        self.show_model.active_list = len(self.show_model.cue_lists) - 1
+        self._refresh_table()
+
+    def remove_cue_list(self) -> None:
+        """Delete the active list or cart, and everything in it."""
+        lists = self.show_model.lists
+        if len(lists) < 2:
+            QMessageBox.information(self, "Cue lists", "A show keeps at least one cue list.")
+            return
+        entry = self.show_model.current
+        answer = QMessageBox.question(
+            self, "Delete cue list",
+            f"Delete \u201c{entry.name}\u201d and the {len(entry.cues)} cues in it?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._remember("Delete List")
+        del self.show_model.cue_lists[self.show_model.active_list]
+        self.show_model.active_list = max(0, self.show_model.active_list - 1)
+        self._refresh_table()
+
+    def rename_cue_list(self, name: str) -> None:
+        self.show_model.current.name = name.strip() or self.show_model.current.name
+        self._refresh_lists()
+
     def _playhead_row(self) -> int:
         """The row GO will play next: the selected row, else the last row selected, else the first cue.
+
+        A cart has no playhead, so GO there simply starts whatever is selected.
 
         Clicking away clears the highlight but keeps this position, so GO carries on from where you were.
         """
@@ -2343,6 +2460,8 @@ class MainWindow(QMainWindow):
         row = self._selected_row()
         if row >= 0:
             return row
+        if self.showing_cart():
+            return -1  # nothing picked in a cart means nothing to start
         if 0 <= self._last_row < len(self.show_model.cues):
             return self._last_row
         return 0
@@ -2745,6 +2864,9 @@ class MainWindow(QMainWindow):
         self._refresh_table()
 
     def add_special_cue(self, kind: str) -> None:
+        if kind == "group" and self.showing_cart():
+            QMessageBox.information(self, "Cue carts", "A cart cannot hold group cues.")
+            return
         self._remember("Add Cue")
         cue = Cue(number=self.show_model.next_number(), name=SPECIAL_KINDS[kind], kind=kind)
         self.show_model.cues.append(cue)
@@ -3272,7 +3394,8 @@ class MainWindow(QMainWindow):
             self._playing_cue = cue
             if cue.then == "continue" and row + 1 < len(cues):
                 self.go_row(row + 1)
-        self.table.selectRow(min(row + 1, len(cues) - 1))
+        if not self.showing_cart():
+            self.table.selectRow(min(row + 1, len(cues) - 1))
 
     def stop(self) -> None:
         self._pause_spotify()
