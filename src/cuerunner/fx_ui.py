@@ -38,8 +38,11 @@ class EffectParams(QWidget):
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._grid.setHorizontalSpacing(8)
         self._grid.setVerticalSpacing(4)
-        self._empty = QLabel("Add an effect to set it up.")
-        self._grid.addWidget(self._empty, 0, 0, 1, COLUMNS * 2)
+        self._placeholder()
+
+    def _placeholder(self) -> None:
+        """What the panel says when no effect is selected."""
+        self._grid.addWidget(QLabel("Add an effect to set it up."), 0, 0, 1, COLUMNS * 2)
 
     def show_effect(self, effect: dict | None) -> None:
         """Build controls for this effect, or clear them when nothing is selected."""
@@ -53,8 +56,13 @@ class EffectParams(QWidget):
         try:
             while self._grid.count():
                 item = self._grid.takeAt(0)
-                if item.widget() is not None:
-                    item.widget().setParent(None)
+                widget = item.widget()
+                if widget is not None:
+                    # Never setParent(None) here: a widget with no parent is a window of
+                    # its own, which on a Mac put an empty grey panel on screen every time
+                    # an effect was added. Hiding and deleting leaves it a child until it goes.
+                    widget.hide()
+                    widget.deleteLater()
             self._spins = {}
             self._bypass = None
             self._open_editor = None
@@ -64,8 +72,7 @@ class EffectParams(QWidget):
                 return
             spec = fx.EFFECTS.get(kind or "")
             if spec is None:
-                self._empty = QLabel("Add an effect to set it up.")
-                self._grid.addWidget(self._empty, 0, 0, 1, COLUMNS * 2)
+                self._placeholder()
                 return
             for index, param in enumerate(spec.params):
                 row, column = divmod(index, COLUMNS)

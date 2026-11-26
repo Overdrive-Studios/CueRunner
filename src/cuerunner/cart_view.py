@@ -37,8 +37,10 @@ class CartView(QWidget):
     def _build(self) -> None:
         while self._grid.count():
             item = self._grid.takeAt(0)
-            if item.widget() is not None:
-                item.widget().setParent(None)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()  # not setParent(None): that would make it a window of its own
+                widget.deleteLater()
         self._buttons = []
         for slot in range(self._columns * self._rows):
             button = QPushButton("")

@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QStackedWidget,
     QTabBar,
+    QAbstractSpinBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -44,6 +45,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QPlainTextEdit,
+    QTextEdit,
     QSpinBox,
     QMessageBox,
     QProgressBar,
@@ -119,6 +121,36 @@ GROUP_MODE_LABELS = [
     ("Start random: start one cue at random", "start_random"),
 ]
 CONTINUE_MODES = [("Do not continue", "none"), ("Auto-follow", "follow"), ("Auto-continue", "continue")]
+
+# QLab's playback keys, from its Default Keyboard Controls. These are single keys with no
+# modifier, so they are ignored while the cursor is in a field the user is typing in.
+# (method name, key, what it does - the last is what the Help > Keyboard Shortcuts window shows)
+PLAYBACK_KEYS = [
+    ("go", "Space", "GO: start the cue at the playhead"),
+    ("_panic_pressed", "Esc", "Panic: fade everything out. Press twice to cut it dead"),
+    ("panic_selected", "S", "Panic the selected cue. Press twice to cut it dead"),
+    ("pause_selected", "P", "Pause or resume the selected cue"),
+    ("pause_all", "[", "Pause everything"),
+    ("resume_all", "]", "Resume everything"),
+    ("load_selected", "L", "Load the selected cue, ready to start instantly"),
+    ("toggle_flag", "F", "Flag or unflag the selected cue"),
+    ("edit_cue_name", "Q", "Edit the cue's name"),
+    ("edit_cue_notes", "O", "Edit the cue's notes"),
+    ("edit_cue_pre_wait", "E", "Edit the cue's pre-wait"),
+    ("edit_cue_post_wait", "W", "Edit the cue's post-wait"),
+    ("cycle_continue", "C", "Cycle the cue's continue mode"),
+    ("edit_selected", "T", "Open the full cue editor"),
+]
+
+# Escape is the emergency stop, so it works even if the cursor happens to be in a field.
+# Every other single key would be a character the user meant to type.
+ALWAYS_KEYS = {"_panic_pressed"}
+
+# The cue types QLab puts on Command and a number, in QLab's own order.
+CUE_TYPE_KEYS = {
+    "group": "0", "audio": "1", "mic": "2", "video": "3", "camera": "4",
+    "text": "5", "light": "6", "fade": "7", "network": "8", "midi": "9",
+}
 
 
 def _file_format(path: str) -> str:
@@ -262,9 +294,15 @@ QHeaderView::section {
     padding: 5px 8px; font-size: 13px; font-weight: 600;
 }
 QPushButton#modeButton {
-    background: #56565b; color: #d8d8dc; border: 1px solid #47474c; padding: 4px 16px; font-size: 13px;
+    background: #36363a; color: #a8a8b0; border: 1px solid #47474c; padding: 4px 18px; font-size: 13px;
+    font-weight: 600;
 }
-QPushButton#modeButton:checked { background: #6a6a70; color: #ffffff; }
+QPushButton#modeButton:hover { background: #45454a; color: #d8d8dc; }
+/* The chosen half has to be obvious at a glance: which mode you are in decides whether
+   the show can be edited, and a shade of grey either way told nobody anything. */
+QPushButton#modeButton:checked {
+    background: #4a90d9; color: #ffffff; border: 1px solid #357ab8;
+}
 QLabel#cueCount { color: #c8c8cc; font-size: 13px; }
 """
 
@@ -939,15 +977,13 @@ class MainWindow(QMainWindow):
         self._alert_timer.setSingleShot(True)
         self._alert_timer.timeout.connect(lambda: self.alert_label.setVisible(False))
         self._quitting = False  # guards against the quit being handled twice
+        self._last_panic_selected = 0.0
         self._build_central()
         self._load_view_settings()
         self.setAcceptDrops(True)  # drop audio, video or MIDI files onto the window to add cues
         QApplication.instance().installEventFilter(self)  # clicks elsewhere clear the highlight
 
-        go_key = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
-        go_key.activated.connect(self.go)
-        panic_key = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
-        panic_key.activated.connect(self._panic_pressed)
+        self._build_playback_keys()
 
         self.clock_timer = QTimer(self)
         self.clock_timer.setInterval(100)
@@ -1580,6 +1616,8 @@ class MainWindow(QMainWindow):
         file_menu.addAction("New Show", self.new_show, QKeySequence(QKeySequence.StandardKey.New))
         file_menu.addAction("Open Show...", self.open_show, QKeySequence(QKeySequence.StandardKey.Open))
         file_menu.addAction("Save Show", self.save_show, QKeySequence(QKeySequence.StandardKey.Save))
+        file_menu.addAction("Save Show As...", self.save_show_as,
+                            QKeySequence(QKeySequence.StandardKey.SaveAs))
         # Quit goes through the window so unsaved work is noticed. On a Mac this lands in
         # the application menu and replaces the one Qt would add for itself.
         quit_action = file_menu.addAction("Quit", self.close, QKeySequence(QKeySequence.StandardKey.Quit))
@@ -1604,16 +1642,30 @@ class MainWindow(QMainWindow):
         self.pads_action.toggled.connect(self._show_bottom_panel)
 
         cues_menu = self.menuBar().addMenu("Cues")
-        cues_menu.addAction("Add Audio Cue...", self.add_audio_cue)
-        cues_menu.addAction("Add Video Cue...", self.add_video_cue)
-        cues_menu.addAction("Add Camera Cue...", self.add_camera_cue)
+
+        def cue_action(label: str, slot, kind: str) -> None:
+            """One Add Cue item, on the Command key QLab gives that cue type."""
+            action = cues_menu.addAction(label, slot)
+            key = CUE_TYPE_KEYS.get(kind)
+            if key:
+                action.setShortcut(QKeySequence(f"Ctrl+{key}"))
+
+        cue_action("Add Audio Cue...", self.add_audio_cue, "audio")
+        cue_action("Add Video Cue...", self.add_video_cue, "video")
+        cue_action("Add Camera Cue...", self.add_camera_cue, "camera")
         cues_menu.addAction("Add Spotify Cue...", self.add_spotify_cue)
         cues_menu.addAction("Add Console Cue...", self.add_console_cue)
         for kind, label in SPECIAL_KINDS.items():
-            cues_menu.addAction(f"Add {label} Cue...", lambda _=False, k=kind: self.add_special_cue(k))
+            cue_action(f"Add {label} Cue...",
+                       lambda _=False, k=kind: self.add_special_cue(k), kind)
         cues_menu.addSeparator()
-        cues_menu.addAction("Edit Cue...", self.edit_selected)
-        cues_menu.addAction("Remove Cue", self.remove_cue)
+        edit_action = cues_menu.addAction("Edit Cue...", self.edit_selected)
+        edit_action.setShortcut(QKeySequence("Ctrl+E"))
+        remove_action = cues_menu.addAction("Remove Cue", self.remove_cue)
+        remove_action.setShortcut(QKeySequence("Ctrl+Backspace"))
+        cues_menu.addSeparator()
+        select_all = cues_menu.addAction("Select All Cues", self.select_all_cues)
+        select_all.setShortcut(QKeySequence(QKeySequence.StandardKey.SelectAll))
         audio_menu = self.menuBar().addMenu("Audio")
         audio_menu.addAction("Output Device...", self.choose_output)
         audio_menu.addAction("Choose Mic Input...", self.choose_mic)
@@ -1653,6 +1705,8 @@ class MainWindow(QMainWindow):
         control_menu.addAction("Allen & Heath Console...", self.open_console)
         control_menu.addAction("Spotify...", self.open_spotify)
         help_menu = self.menuBar().addMenu("Help")
+        help_menu.addAction("Keyboard Shortcuts", self.show_shortcuts)
+        help_menu.addSeparator()
         help_menu.addAction("Check for Updates...", self.check_for_updates)
         help_menu.addAction(f"About CueRunner {__version__}", self.about)
 
@@ -2463,6 +2517,124 @@ class MainWindow(QMainWindow):
         else:
             self.now_label.setText("Standby")
 
+    # --- keyboard -------------------------------------------------------
+    def _build_playback_keys(self) -> None:
+        """QLab's single-key playback controls, which work anywhere but a text field."""
+        self._playback_keys = []
+        for name, key, _ in PLAYBACK_KEYS:
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.activated.connect(lambda n=name: self._run_playback_key(n))
+            self._playback_keys.append(shortcut)
+
+    def _typing(self) -> bool:
+        """True when the cursor is in something the user is typing into.
+
+        Without this, pressing S in a cue name would panic the show instead of typing an S.
+        """
+        focus = QApplication.focusWidget()
+        if focus is None:
+            return False
+        if isinstance(focus, (QLineEdit, QPlainTextEdit, QTextEdit, QKeySequenceEdit)):
+            return True
+        if isinstance(focus, QAbstractSpinBox):
+            return True
+        if isinstance(focus, QComboBox) and focus.isEditable():
+            return True
+        # A spin box or combo box puts its own line edit in the focus chain.
+        return isinstance(focus.parent(), (QAbstractSpinBox, QComboBox))
+
+    def _run_playback_key(self, name: str) -> None:
+        if name not in ALWAYS_KEYS and self._typing():
+            return
+        getattr(self, name)()
+
+    def panic_selected(self) -> None:
+        """Fade the selected cue out, or cut it dead on a second press."""
+        cue = self._selected_cue()
+        if cue is None:
+            return
+        now = time.monotonic()
+        double_tap = now - self._last_panic_selected < 0.4
+        self._last_panic_selected = now
+        if double_tap and self.mixer is not None:
+            self.mixer.kill(cue)
+            self._video.stop_all()
+            return
+        self._stop_cue(cue)
+
+    def pause_selected(self) -> None:
+        """Pause the selected cue, or let it run on again."""
+        cue = self._selected_cue()
+        if cue is None:
+            return
+        running = [v for v in self._cue_voices if v.tag is cue and not v.done]
+        if not running:
+            return
+        self._pause_cue(cue, not all(v.paused for v in running))
+
+    def pause_all(self) -> None:
+        if self.mixer is None:
+            return
+        self.mixer.paused = True
+        self.pause_button.setText("RESUME")
+
+    def resume_all(self) -> None:
+        if self.mixer is None:
+            return
+        self.mixer.paused = False
+        self.pause_button.setText("PAUSE")
+
+    def load_selected(self) -> None:
+        """Get the selected cue ready so GO starts it with no delay, and go to it."""
+        row = self._selected_row()
+        cues = self.show_model.cues
+        if not 0 <= row < len(cues):
+            return
+        self._preload(cues[row])
+        if not self.showing_cart():
+            self.table.selectRow(row)
+
+    def toggle_flag(self) -> None:
+        cue = self._selected_cue()
+        if cue is None or not self._editing:
+            return
+        self._remember("Flag Cue")
+        cue.flagged = not cue.flagged
+        self._refresh_table()
+        self._refresh_inspector()
+
+    def _focus_inspector(self, tab: str, widget) -> None:
+        """Bring a field into view and put the cursor in it, the way QLab's edit keys do."""
+        if self._selected_cue() is None or not self._editing:
+            return
+        self.insp_tabs.setCurrentIndex(INSPECTOR_TABS.index(tab))
+        widget.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        if hasattr(widget, "selectAll"):
+            widget.selectAll()
+
+    def edit_cue_name(self) -> None:
+        self._focus_inspector("Basics", self.insp_name)
+
+    def edit_cue_notes(self) -> None:
+        self._focus_inspector("Basics", self.insp_notes)
+
+    def edit_cue_pre_wait(self) -> None:
+        self._focus_inspector("Basics", self.insp_pre)
+
+    def edit_cue_post_wait(self) -> None:
+        self._focus_inspector("Basics", self.insp_post)
+
+    def cycle_continue(self) -> None:
+        """Step the selected cue through do-not-continue, auto-follow, auto-continue."""
+        cue = self._selected_cue()
+        if cue is None or not self._editing:
+            return
+        order = [value for _, value in CONTINUE_MODES]
+        self._remember("Continue Mode")
+        cue.then = order[(order.index(cue.then) + 1) % len(order)] if cue.then in order else order[0]
+        self._refresh_table()
+        self._refresh_inspector()
+
     def _rebuild_shortcuts(self) -> None:
         for shortcut in self._shortcuts:
             shortcut.setEnabled(False)
@@ -2711,10 +2883,14 @@ class MainWindow(QMainWindow):
             self._last_row = row
 
     def _on_outside_click(self, widget: QWidget) -> None:
-        """A click anywhere except the cue table and the inspector clears the track highlight."""
-        if widget is self.table or self.table.isAncestorOf(widget):
-            return
-        if widget is self.inspector_bar or self.inspector_bar.isAncestorOf(widget):
+        """A click on the empty background of the window clears the cue selection.
+
+        Only the background. This used to fire for every widget in the window, so pressing
+        Stop, or Edit, or anything else deselected the cue you were working on and emptied
+        the inspector, which made those buttons look like they did nothing.
+        """
+        background = {self, self.centralWidget()}
+        if widget not in background:
             return
         if self.table.selectedIndexes():
             self.table.clearSelection()
@@ -2802,6 +2978,26 @@ class MainWindow(QMainWindow):
             return
         launcher.remember_show(self.show_path)
         self._mark_saved()
+
+    def save_show_as(self) -> None:
+        """Save under a new name, leaving the file it came from as it was."""
+        suggested = self.show_path.name if self.show_path else "show.cuerunner.json"
+        filename, _ = QFileDialog.getSaveFileName(self, "Save show as", suggested, SHOW_FILTER)
+        if not filename:
+            return
+        self.show_path = Path(filename)
+        self.save_show()
+
+    def select_all_cues(self) -> None:
+        if not self.showing_cart():
+            self.table.selectAll()
+
+    def show_shortcuts(self) -> None:
+        """The keyboard shortcut list, which is the only way anyone finds the single keys."""
+        rows = [f"{key}\u2003{what}" for _, key, what in PLAYBACK_KEYS]
+        rows.append("")
+        rows.append("Menu items show their own shortcuts beside them.")
+        QMessageBox.information(self, "Keyboard Shortcuts", "\n".join(rows))
 
     # --- Cue actions --------------------------------------------------
 
