@@ -97,12 +97,14 @@ from cuerunner.remote import RemoteServer, RemoteState, lan_ip
 from cuerunner.soundboard import Soundboard
 from cuerunner.theme import apply_dark_theme
 from cuerunner.timecode import format_clock, format_duration, format_hms
+from cuerunner.timeline_view import TimelineView
 from cuerunner.version import __version__
 
 BACKUP_INTERVAL_MS = 15 * 60 * 1000  # automatic show snapshot every 15 minutes
 DMX_STEP_MS = 40  # light ramps send a new frame this often
 INSPECTOR_MAX_HEIGHT = 250  # the inspector scrolls past this, so the cue list keeps its room
-INSPECTOR_TABS = ["Basics", "Triggers", "I/O", "Time & Loops", "Levels", "Objects", "Trim", "Audio FX"]
+INSPECTOR_TABS = ["Basics", "Triggers", "Timeline", "I/O", "Time & Loops", "Levels",
+                  "Objects", "Trim", "Audio FX"]
 # Qt reads a single & as a keyboard shortcut marker, so it is doubled for display only.
 TAB_LABELS = [t.replace("&", "&&") for t in INSPECTOR_TABS]
 MIDI_TRIGGER_KINDS = [("Note On", "note_on"), ("Note Off", "note_off"), ("Control Change", "control_change")]
@@ -1153,9 +1155,60 @@ class MainWindow(QMainWindow):
             self.insp_curve.setCurrentIndex(max(0, self.insp_curve.findData(cue.fade_curve)))
             self._refresh_effects(cue)
             self._refresh_objects_tab(cue, editable)
+            self._refresh_timeline_tab(cue, editable)
             self._refresh_waveform(cue)
         finally:
             self._insp_busy = False
+
+    def _refresh_timeline_tab(self, cue: Cue, editable: bool) -> None:
+        """Fill the Timeline tab, and show the tab only for a group cue in timeline mode.
+
+        QLab puts a Timeline tab on Timeline Group cues and nowhere else, because a
+        timeline is only meaningful where the children all start together.
+        """
+        if not hasattr(self, "insp_timeline"):
+            return
+        index = INSPECTOR_TABS.index("Timeline")
+        wanted = cue.kind == "group" and group_mode_of(cue) == "timeline"
+        # Qt moves off a tab it is told to hide, but to whichever one is next along. Land
+        # on Basics instead, which is where QLab leaves you.
+        showing = self.insp_tabs.currentIndex() == index
+        self.insp_tabs.setTabVisible(index, wanted)
+        if not wanted:
+            if showing:
+                self.insp_tabs.setCurrentIndex(0)
+            self.insp_timeline.set_cues([])
+            return
+        if self.insp_timeline.is_dragging():
+            return
+        cues = self.show_model.cues
+        children = [cues[i] for i in self._group_children(cue.number)]
+        self.insp_timeline.set_cues(children)
+        self.insp_timeline.set_editable(editable)
+        self.insp_timeline.set_playhead(self._timeline_playhead(children))
+
+    def _timeline_playhead(self, children: list[Cue]) -> float:
+        """How far into the group playback has got, taken from whichever child is furthest.
+
+        This is the yellow line, and dragged cues snap to it, so pausing at a moment and
+        dragging a cue onto it lines the cue up exactly.
+        """
+        furthest = 0.0
+        if self.mixer is None:  # no output open, so nothing is playing to follow
+            return 0.0
+        rate = max(self.mixer.rate, 1)
+        for voice in self._cue_voices:
+            cue = next((c for c in children if c is voice.tag), None)
+            if cue is None or voice.done or voice.preloaded:
+                continue
+            played = max(voice.position / rate - cue.trim_in, 0.0)
+            furthest = max(furthest, cue.pre_wait_ms / 1000 + played)
+        return furthest
+
+    def _timeline_changed(self) -> None:
+        """A drag or nudge in the timeline changed a child cue's timing."""
+        self._refresh_table()
+        self._refresh_inspector()
 
     def _refresh_waveform(self, cue: Cue | None = None) -> None:
         """Load the selected cue's waveform, but only while the Time & Loops tab is showing.
@@ -1928,6 +1981,27 @@ class MainWindow(QMainWindow):
         tgrid.setRowStretch(6, 1)
         built_pages["Triggers"] = triggers_page
 
+        # Timeline: a Timeline Group's children on a shared time ruler. Only group cues in
+        # timeline mode have one, so the tab hides itself for everything else.
+        timeline_page = QFrame()
+        timeline_page.setObjectName("inspectorPage")
+        tlgrid = QGridLayout(timeline_page)
+        tlgrid.setContentsMargins(12, 10, 12, 10)
+        tlgrid.setVerticalSpacing(6)
+        self.insp_timeline = TimelineView()
+        # The hint lives on the widget rather than under it: the inspector is short, and a
+        # paragraph of instructions under the timeline is exactly the clutter to avoid.
+        self.insp_timeline.setToolTip(
+            "Drag a cue to set its pre-wait, either end to trim it, or the bottom edge to "
+            "resize the row.\n"
+            "Alt+\u2190 and Alt+\u2192 nudge by 0.1 s; add Shift for 0.01 s.\n"
+            "Hold Ctrl while dragging to ignore the snap lines, Alt to slip the file."
+        )
+        tlgrid.addWidget(self.insp_timeline, 0, 0)
+        tlgrid.setRowStretch(0, 1)
+        tlgrid.setColumnStretch(0, 1)
+        built_pages["Timeline"] = timeline_page
+
         # Time & Loops: looping and the loop points.
         time_page = QFrame()
         time_page.setObjectName("inspectorPage")
@@ -2151,6 +2225,9 @@ class MainWindow(QMainWindow):
             self.insp_stack.addWidget(built_pages[title])
         self.insp_tabs.currentChanged.connect(self.insp_stack.setCurrentIndex)
         self.insp_tabs.currentChanged.connect(lambda _: self._refresh_waveform())
+        self.insp_timeline.about_to_edit.connect(
+            lambda: self._remember("Timeline Edit", coalesce=True))
+        self.insp_timeline.changed.connect(self._timeline_changed)
         self.insp_wave.markersChanged.connect(self._wave_markers_changed)
         self.insp_wave.seeked.connect(self._seek_selected_cue)
         # The stack is as tall as its tallest page, so it is capped and scrolls instead of
@@ -2175,7 +2252,7 @@ class MainWindow(QMainWindow):
             self.insp_loop_out, self.insp_trigger_tc, self.insp_route_button, self.insp_patch,
             self.insp_set_default, self.insp_set_silent, self.insp_clear_mutes,
             self.insp_clear_solos, self.insp_view_map, self.insp_edit_patches,
-            self.insp_wave,
+            self.insp_wave, self.insp_timeline,
             self.insp_fade_in, self.insp_fade_out, self.insp_start_time, self.insp_end_time,
             self.insp_trim, self.insp_play_once, self.insp_play_count, self.insp_infinite,
             self.insp_rate, self.insp_preserve_pitch, self.insp_integrated, self.insp_curve,
