@@ -92,8 +92,9 @@ def test_tab_pages_line_up_with_the_tab_row(window):
     from cuerunner.main import TAB_LABELS
 
     assert [window.insp_tabs.tabText(i) for i in range(len(INSPECTOR_TABS))] == TAB_LABELS
-    window.insp_tabs.setCurrentIndex(3)  # Time & Loops
-    assert window.insp_stack.currentIndex() == 3
+    wanted = INSPECTOR_TABS.index("Time & Loops")
+    window.insp_tabs.setCurrentIndex(wanted)
+    assert window.insp_stack.currentIndex() == wanted
 
 
 def test_loop_and_timecode_trigger_write_back(window):

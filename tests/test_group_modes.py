@@ -143,3 +143,75 @@ def test_the_mode_is_saved_with_the_show(tmp_path):
 def test_the_row_says_which_kind_of_group_it_is(window):
     a_group(window, "playlist")
     assert "Playlist group of 3 cues" == window._target_text(window.show_model.cues[0])
+
+
+# ------------------------------------------------------------- timeline tab
+def _timeline_index():
+    from cuerunner.main import INSPECTOR_TABS
+    return INSPECTOR_TABS.index("Timeline")
+
+
+def test_the_timeline_tab_only_shows_for_a_timeline_group(window):
+    a_group(window, "timeline")
+    index = _timeline_index()
+    window.table.selectRow(0)
+    assert window.insp_tabs.isTabVisible(index)
+    window.show_model.cues[0].group_mode = "playlist"
+    window._refresh_inspector()
+    assert not window.insp_tabs.isTabVisible(index)
+    window.table.selectRow(1)  # a plain cue inside the group
+    assert not window.insp_tabs.isTabVisible(index)
+
+
+def test_the_timeline_tab_shows_the_groups_children_in_order(window):
+    a_group(window, "timeline")
+    window.table.selectRow(0)
+    assert [c.number for c in window.insp_timeline.cues()] == ["1.1", "1.2", "1.3"]
+    assert window.insp_timeline.cues()[0] is window.show_model.cues[1]
+
+
+def test_leaving_a_timeline_group_empties_the_timeline_and_leaves_the_tab(window):
+    a_group(window, "timeline")
+    index = _timeline_index()
+    window.table.selectRow(0)
+    window.insp_tabs.setCurrentIndex(index)
+    window.table.selectRow(4)  # the cue after the group
+    assert window.insp_timeline.cues() == []
+    assert window.insp_tabs.currentIndex() == 0  # the tab it was on has gone
+
+
+def test_the_timeline_follows_edit_mode(window):
+    a_group(window, "timeline")
+    window.table.selectRow(0)
+    window._editing = True
+    window._refresh_inspector()
+    assert window.insp_timeline.isEnabled()
+    window._editing = False
+    window._refresh_inspector()
+    assert not window.insp_timeline.isEnabled()
+
+
+def test_a_timeline_nudge_writes_through_to_the_show_and_can_be_undone(window):
+    a_group(window, "timeline")
+    window._editing = True
+    window.table.selectRow(0)
+    window.insp_timeline.select([1])
+    window.insp_timeline.nudge(0.5)
+    assert window.show_model.cues[2].pre_wait_ms == 500
+    window.undo()
+    assert window.show_model.cues[2].pre_wait_ms == 0
+
+
+def test_the_timeline_playhead_tracks_a_running_child(window):
+    from unittest import mock as _mock
+    a_group(window, "timeline")
+    window.table.selectRow(0)
+    child = window.show_model.cues[2]
+    child.pre_wait_ms = 2000
+    rate = window.mixer.rate if window.mixer is not None else 48000
+    voice = _mock.Mock(done=False, preloaded=False, tag=child, position=rate * 3)
+    window._cue_voices = [voice]
+    if window.mixer is None:
+        window.mixer = _mock.Mock(rate=rate)
+    window._refresh_inspector()
+    assert window.insp_timeline.playhead() == pytest.approx(5.0)

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QDoubleSpinBox,
     QSpinBox,
     QStackedWidget,
@@ -35,7 +36,8 @@ from cuerunner.model import Show
 
 REMOTE_PORT_RANGE = (1024, 65535)
 LABEL_WIDTH = 230
-NOTE_MIN_WIDTH = 220
+NOTE_MIN_WIDTH = 220  # what a note asks for; it wraps smaller rather than being cut off
+NOTE_FLOOR = 140  # and never narrower than this
 
 # Shortcut rows: (row label, button text, key the main window passes in).
 DEVICE_ACTIONS = [
@@ -106,6 +108,8 @@ QTableWidget#videoTable QHeaderView::section:vertical {
     background: #2b2b2e; color: #e8e8ea; border: 0; border-right: 1px solid #3a3a3e; padding: 6px 8px;
 }
 QTableWidget#videoTable QTableCornerButton::section { background: #3a3a3e; border: 0; }
+QScrollArea#settingsPage { background: transparent; border: none; }
+QScrollArea#settingsPage > QWidget > QWidget { background: transparent; }
 QScrollArea#editList { background: #1a1a1c; border: 1px solid #3a3a3e; }
 QScrollArea#editList > QWidget > QWidget { background: #1a1a1c; }
 """
@@ -161,7 +165,13 @@ def _row(label: str, control: QWidget, note: str = "") -> QWidget:
         text = QLabel(note)
         text.setObjectName("rowNote")
         text.setWordWrap(True)
-        text.setMinimumWidth(NOTE_MIN_WIDTH)  # keeps the note to a few readable lines instead of one word per line
+        # It asks for enough room to read a few words per line, but it never insists: a
+        # note that cannot have its width wraps to more lines rather than being cut off,
+        # which is what used to happen to the longer notes in a narrow window.
+        policy = QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
+        policy.setHeightForWidth(True)
+        text.setSizePolicy(policy)
+        text.setMinimumWidth(NOTE_FLOOR)  # below this a note is unreadable, so scroll instead
         layout.addWidget(text, 1, Qt.AlignmentFlag.AlignTop)
     else:
         layout.addStretch(1)
@@ -169,8 +179,9 @@ def _row(label: str, control: QWidget, note: str = "") -> QWidget:
 
 
 def _page(title: str, rows: list[QWidget]) -> QWidget:
-    page = QWidget()
-    layout = QVBoxLayout(page)
+    """One settings page, in a scroller so a long page is never cut off at the bottom."""
+    body = QWidget()
+    layout = QVBoxLayout(body)
     layout.setContentsMargins(24, 20, 24, 20)
     layout.setSpacing(0)
     heading = QLabel(title)
@@ -182,6 +193,12 @@ def _page(title: str, rows: list[QWidget]) -> QWidget:
             layout.addWidget(_rule())
         layout.addWidget(row)
     layout.addStretch(1)
+
+    page = QScrollArea()
+    page.setObjectName("settingsPage")
+    page.setWidgetResizable(True)
+    page.setFrameShape(QFrame.Shape.NoFrame)
+    page.setWidget(body)
     return page
 
 
@@ -434,7 +451,10 @@ class SettingsDialog(QDialog):
         self.setObjectName("settings")
         self.setWindowTitle("Settings")
         self.setStyleSheet(SETTINGS_QSS)
-        self.setFixedSize(820, 520)
+        # Wide enough for the longest note beside the widest field, and resizable, so a
+        # smaller window wraps the notes instead of clipping them.
+        self.setMinimumSize(900, 460)
+        self.resize(980, 560)
         current = settings_from(show)
         actions = actions or {}
 
