@@ -6,10 +6,13 @@ they can overlap, and the mixer is fed to the sound card by audio_io.
 
 from __future__ import annotations
 
+import json
 import shlex
 import subprocess
 import sys
 import tempfile
+import time
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
@@ -788,6 +791,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.show_model = Show()
         self.show_path: Path | None = None
+        self._undo: list[tuple[str, str]] = []  # (what changed, the cue list before it)
+        self._redo: list[tuple[str, str]] = []
+        self._undo_at = 0.0
         self._saved_json = self.show_model.to_json()  # the show as it was last saved or opened
         self._shortcuts: list[QShortcut] = []
         self._clips: dict[str, Clip] = {}
@@ -1173,6 +1179,7 @@ class MainWindow(QMainWindow):
         cue = self._selected_cue()
         if cue is None or not self._editing:
             return
+        self._remember("Add Effect")
         cue.effects.append(fx.new_effect(kind))
         self._refresh_effects(cue)
         self.insp_fx_list.setCurrentRow(len(cue.effects) - 1)
@@ -1237,6 +1244,7 @@ class MainWindow(QMainWindow):
         row = self.insp_fx_list.currentRow()
         if cue is None or not self._editing or not 0 <= row < len(cue.effects):
             return
+        self._remember("Remove Effect")
         cue.effects.pop(row)
         self._refresh_effects(cue)
 
@@ -1277,6 +1285,7 @@ class MainWindow(QMainWindow):
         if not 0 <= row < len(cues):
             return
         cue = cues[row]
+        self._remember("Edit Cue", coalesce=True)
         trigger = self.insp_trigger_tc.text().strip()
         if trigger:
             try:
@@ -1397,6 +1406,13 @@ class MainWindow(QMainWindow):
         # the application menu and replaces the one Qt would add for itself.
         quit_action = file_menu.addAction("Quit", self.close, QKeySequence(QKeySequence.StandardKey.Quit))
         quit_action.setMenuRole(QAction.MenuRole.QuitRole)
+        edit_menu = self.menuBar().addMenu("Edit")
+        self.undo_action = edit_menu.addAction("Undo", self.undo,
+                                               QKeySequence(QKeySequence.StandardKey.Undo))
+        self.redo_action = edit_menu.addAction("Redo", self.redo,
+                                               QKeySequence(QKeySequence.StandardKey.Redo))
+        self._refresh_undo_actions()
+
         cues_menu = self.menuBar().addMenu("Cues")
         cues_menu.addAction("Add Audio Cue...", self.add_audio_cue)
         cues_menu.addAction("Add Video Cue...", self.add_video_cue)
@@ -2224,6 +2240,67 @@ class MainWindow(QMainWindow):
             self._on_outside_click(obj)
         return False
 
+    UNDO_DEPTH = 60
+    COALESCE_SECONDS = 1.0  # a run of small changes to the same thing counts as one step
+
+    def _cue_snapshot(self) -> str:
+        return json.dumps([asdict(c) for c in self.show_model.cues])
+
+    def _restore_cues(self, snapshot: str) -> None:
+        allowed = set(Cue.__dataclass_fields__)
+        self.show_model.cues = [Cue(**{k: v for k, v in raw.items() if k in allowed})
+                                for raw in json.loads(snapshot)]
+        self._refresh_table()
+        self._refresh_inspector()
+
+    def _remember(self, label: str, coalesce: bool = False) -> None:
+        """Record the cue list as it is now, before something changes it.
+
+        coalesce is for edits that arrive in a stream, such as a slider being dragged:
+        a run of them counts as one step. Separate actions are always their own step.
+        """
+        snapshot = self._cue_snapshot()
+        now = time.monotonic()
+        if self._undo:
+            last_label, last_snapshot = self._undo[-1]
+            if last_snapshot == snapshot:
+                return  # nothing actually changed since last time
+            if coalesce and last_label == label and now - self._undo_at < self.COALESCE_SECONDS:
+                self._undo_at = now
+                return
+        self._undo.append((label, snapshot))
+        del self._undo[:-self.UNDO_DEPTH]
+        self._undo_at = now
+        self._redo.clear()
+        self._refresh_undo_actions()
+
+    def undo(self) -> None:
+        if not self._undo:
+            return
+        label, snapshot = self._undo.pop()
+        self._redo.append((label, self._cue_snapshot()))
+        self._restore_cues(snapshot)
+        self._undo_at = 0.0
+        self._refresh_undo_actions()
+
+    def redo(self) -> None:
+        if not self._redo:
+            return
+        label, snapshot = self._redo.pop()
+        self._undo.append((label, self._cue_snapshot()))
+        self._restore_cues(snapshot)
+        self._undo_at = 0.0
+        self._refresh_undo_actions()
+
+    def _refresh_undo_actions(self) -> None:
+        """Keep the menu entries naming what they would actually undo."""
+        if not hasattr(self, "undo_action"):
+            return
+        self.undo_action.setEnabled(bool(self._undo))
+        self.redo_action.setEnabled(bool(self._redo))
+        self.undo_action.setText(f"Undo {self._undo[-1][0]}" if self._undo else "Undo")
+        self.redo_action.setText(f"Redo {self._redo[-1][0]}" if self._redo else "Redo")
+
     def _cue_problem(self, title: str, detail: str = "", modal_when_editing: bool = True) -> None:
         """A cue could not run.
 
@@ -2258,6 +2335,7 @@ class MainWindow(QMainWindow):
         if not typed or typed == cue.name:
             item.setText(("    " if cue.parent else "") + cue.name)  # put back what it was
             return
+        self._remember("Rename")
         cue.name = typed
         self._refresh_inspector()
         self._refresh_now_label()
@@ -2471,6 +2549,7 @@ class MainWindow(QMainWindow):
         event.acceptProposedAction()
 
     def _add_dropped_files(self, accepted: list[tuple[str, str]]) -> None:
+        self._remember("Add Cue")
         """Insert one cue per file. Audio is probed for its length afterwards, as the Add Audio Cues command does."""
         insert_at = self.table.currentRow() + 1 if self.table.currentRow() >= 0 else len(self.show_model.cues)
         default_output = self.show_model.video_default_output if QGuiApplication.screens() else ""
@@ -2490,6 +2569,8 @@ class MainWindow(QMainWindow):
 
     def add_audio_cue(self) -> None:
         filenames, _ = QFileDialog.getOpenFileNames(self, "Add audio cues", "", AUDIO_FILTER)
+        if filenames:
+            self._remember("Add Cue")
         new_cues = []
         for filename in filenames:
             path = Path(filename)
@@ -2505,6 +2586,7 @@ class MainWindow(QMainWindow):
         filenames, _ = QFileDialog.getOpenFileNames(self, "Add video cues", "", VIDEO_FILTER)
         if not filenames:
             return
+        self._remember("Add Cue")
         default_output = self.show_model.video_default_output if QGuiApplication.screens() else ""
         for filename in filenames:
             path = Path(filename)
@@ -2515,6 +2597,7 @@ class MainWindow(QMainWindow):
         self._refresh_table()
 
     def add_special_cue(self, kind: str) -> None:
+        self._remember("Add Cue")
         cue = Cue(number=self.show_model.next_number(), name=SPECIAL_KINDS[kind], kind=kind)
         self.show_model.cues.append(cue)
         self._refresh_table()
@@ -2531,7 +2614,7 @@ class MainWindow(QMainWindow):
         """An instant cue is done: in a playlist group start the next child, otherwise move the playhead."""
         next_child = self._playlist_next_row(row)
         if next_child is not None:
-            self.go_row(next_child, replace=False)
+            self.go_row(next_child)
         self._advance(row)
 
     def _send_dmx(self, cue: Cue, levels: dict[int, int]) -> None:
@@ -2589,7 +2672,7 @@ class MainWindow(QMainWindow):
             target.armed = cue.action == "arm"
             self._refresh_table()
         else:
-            self.go_row(target_row, replace=True)
+            self.go_row(target_row)
 
     def _start_timecode(self, cue: Cue) -> None:
         """Start sending MIDI Timecode for this cue. It keeps running until a Stop cue or Panic."""
@@ -2843,6 +2926,7 @@ class MainWindow(QMainWindow):
         row = self._selected_row()
         if row < 0:
             return
+        self._remember("Remove Cue")
         cue = self.show_model.cues[row]
         for voice in self._cue_voices:
             if voice.tag is cue:
@@ -2855,17 +2939,18 @@ class MainWindow(QMainWindow):
         if row >= 0:
             self.go_row(row)
 
-    def go_row(self, row: int, replace: bool = True, _pre_done: bool = False) -> None:
+    def go_row(self, row: int, _pre_done: bool = False) -> None:
         """Start the cue in this row with its fade-in and move the playhead down.
 
-        replace=True fades out whatever cue is already playing. replace=False lets it run on.
+        Cues layer: starting one leaves whatever is already playing alone, as QLab does.
+        A cue that should clear the others sets "Fade & stop other cues" on its Triggers tab.
         """
         if not self.show_model.cues[row].armed:
             # A disarmed cue never fires. "Skip if disarmed" sends GO on to the next cue;
             # without it the GO is used up here and the playhead simply moves on.
             self._advance(row)
             if self.show_model.cues[row].skip_if_disarmed and row + 1 < len(self.show_model.cues):
-                self.go_row(row + 1, replace=replace)
+                self.go_row(row + 1)
             return
         cues = self.show_model.cues
         if not 0 <= row < len(cues):
@@ -2874,7 +2959,7 @@ class MainWindow(QMainWindow):
         if not _pre_done and self._second_trigger(cue):
             return
         if cue.pre_wait_ms > 0 and not _pre_done:
-            self._after(cue.pre_wait_ms, lambda: self.go_row(row, replace=replace, _pre_done=True))
+            self._after(cue.pre_wait_ms, lambda: self.go_row(row, _pre_done=True))
             return
         if cue.kind == "spotify":
             self._play_spotify_cue(cue)
@@ -2949,17 +3034,17 @@ class MainWindow(QMainWindow):
             if next_row is None:
                 next_row = row + 1 if row + 1 < len(cues) else None
             if next_row is not None:
-                self._after(cue.duration_ms, lambda r=next_row: self.go_row(r, replace=False))
+                self._after(cue.duration_ms, lambda r=next_row: self.go_row(r))
             self._advance(row)
             return
         if cue.kind == "group":
             children = [i for i, child in enumerate(cues) if child.parent == cue.number]
             if cue.group_mode == "playlist":
                 if children:
-                    self.go_row(children[0], replace=False)
+                    self.go_row(children[0])
             else:
                 for i in children:
-                    self.go_row(i, replace=False)
+                    self.go_row(i)
             self._advance(row)
             return
         if cue.kind == "control":
@@ -3017,13 +3102,9 @@ class MainWindow(QMainWindow):
                 ready.preloaded = False
                 self._playing_cue = cue
                 if cue.then == "continue" and row + 1 < len(cues):
-                    self.go_row(row + 1, replace=False)
+                    self.go_row(row + 1)
                 self.table.selectRow(min(row + 1, len(cues) - 1))
                 return
-            if replace:
-                for voice in self._cue_voices:
-                    if not voice.done and not voice.stop_when_done and not voice.preloaded:
-                        self.mixer.fade_out(voice, voice.tag.fade_out)
             voice = Voice(
                 clip=clip,
                 matrix=route_matrix(cue.route, clip.channels, self.mixer.out_channels),
@@ -3042,7 +3123,7 @@ class MainWindow(QMainWindow):
             self._cue_voices.append(voice)
             self._playing_cue = cue
             if cue.then == "continue" and row + 1 < len(cues):
-                self.go_row(row + 1, replace=False)
+                self.go_row(row + 1)
         self.table.selectRow(min(row + 1, len(cues) - 1))
 
     def stop(self) -> None:
@@ -3145,12 +3226,12 @@ class MainWindow(QMainWindow):
                 row = self._row_of(voice.tag)
                 next_child = self._playlist_next_row(row) if row >= 0 else None
                 if next_child is not None:
-                    self.go_row(next_child, replace=False)
+                    self.go_row(next_child)
                 elif row >= 0 and voice.tag.then == "follow" and row + 1 < len(cues):
                     if voice.tag.post_wait_ms > 0:
-                        self._after(voice.tag.post_wait_ms, lambda r=row + 1: self.go_row(r, replace=False))
+                        self._after(voice.tag.post_wait_ms, lambda r=row + 1: self.go_row(r))
                     else:
-                        self.go_row(row + 1, replace=False)
+                        self.go_row(row + 1)
 
         self._cue_voices = [v for v in self._cue_voices if not v.done]
         sounding = [v for v in self._cue_voices if not v.preloaded]
