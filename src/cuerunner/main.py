@@ -74,10 +74,20 @@ from cuerunner.engine import (
     route_matrix,
 )
 from cuerunner.cart_view import CartView
-from cuerunner.model import PAD_COUNT, AudioPatch, Cue, CueList, Pad, RadioSettings, Show
+from cuerunner.model import (
+    PAD_COUNT,
+    AudioPatch,
+    Cue,
+    CueList,
+    Pad,
+    RadioSettings,
+    Show,
+    group_mode_of,
+)
 from cuerunner.playlist import Playlist, scan_audio
 import math
 import queue
+import random
 
 from cuerunner import levels_ui
 from cuerunner.levels_ui import OutputLevels
@@ -99,6 +109,13 @@ MIDI_TRIGGER_KINDS = [("Note On", "note_on"), ("Note Off", "note_off"), ("Contro
 SECOND_TRIGGER_ACTIONS = [("does nothing", "nothing"), ("starts it again", "restart"),
                           ("stops it", "stop"), ("pauses it", "pause")]
 FADE_CURVES = [("Linear curve", "linear"), ("Smooth curve", "smooth")]
+GROUP_MODE_LABELS = [
+    ("Timeline: start every cue at once", "timeline"),
+    ("Playlist: one cue after another", "playlist"),
+    ("Start first and enter: start the first cue, playhead steps in", "start_first_enter"),
+    ("Start first: start the first cue, playhead skips the group", "start_first"),
+    ("Start random: start one cue at random", "start_random"),
+]
 CONTINUE_MODES = [("Do not continue", "none"), ("Auto-follow", "follow"), ("Auto-continue", "continue")]
 
 
@@ -694,9 +711,10 @@ class CueDialog(QDialog):
             form.addRow("Font size", self.font_spin)
         if kind == "group":
             self.group_mode_box = QComboBox()
-            self.group_mode_box.addItem("Fire all children at once", "all")
-            self.group_mode_box.addItem("Playlist: one child after another", "playlist")
-            self.group_mode_box.setCurrentIndex(max(0, self.group_mode_box.findData(cue.group_mode)))
+            for label, value in GROUP_MODE_LABELS:
+                self.group_mode_box.addItem(label, value)
+            self.group_mode_box.setCurrentIndex(
+                max(0, self.group_mode_box.findData(group_mode_of(cue))))
             form.addRow("Mode", self.group_mode_box)
 
     def _route_summary(self) -> str:
@@ -1487,7 +1505,9 @@ class MainWindow(QMainWindow):
             return f"Universe {cue.universe}: {cue.text} to {cue.target}"
         if cue.kind == "group":
             children = sum(1 for c in self.show_model.cues if c.parent == cue.number)
-            return f"Group of {children} cue{'' if children == 1 else 's'}"
+            mode = next((lbl.split(":")[0] for lbl, value in GROUP_MODE_LABELS
+                         if value == group_mode_of(cue)), "Timeline")
+            return f"{mode} group of {children} cue{'' if children == 1 else 's'}"
         if cue.kind in ("text", "memo"):
             return cue.text.replace("\n", " ")[:80]
         return cue.file
@@ -2990,13 +3010,43 @@ class MainWindow(QMainWindow):
             if not voice.done and not voice.stop_when_done and voice.tag is target:
                 self.mixer.fade_out(voice, voice.tag.fade_out)
 
+    def _group_children(self, number: str) -> list[int]:
+        return [i for i, c in enumerate(self.show_model.cues) if c.parent == number]
+
+    def _row_after_group(self, row: int, children: list[int]) -> int:
+        """The first row past the group and everything inside it."""
+        return (max(children) if children else row) + 1
+
+    def _start_group(self, row: int, cue: Cue) -> None:
+        """Start a group cue the way its mode says, and put the playhead where QLab puts it."""
+        children = self._group_children(cue.number)
+        mode = group_mode_of(cue)
+        after = self._row_after_group(row, children)
+
+        if mode == "timeline":
+            for index in children:  # every child at once
+                self.go_row(index)
+        elif mode == "start_random":
+            choices = [i for i in children
+                       if self.show_model.cues[i].armed
+                       and not self._cue_is_running(self.show_model.cues[i])]
+            if choices:
+                self.go_row(random.choice(choices))
+        elif children:
+            self.go_row(children[0])  # playlist, start first, start first and enter
+
+        if mode == "start_first_enter":
+            self._advance(row)  # the playhead steps into the group
+        else:
+            self.table.selectRow(min(after, len(self.show_model.cues) - 1))
+
     def _playlist_next_row(self, row: int) -> int | None:
         """In a playlist group, the row of the child after this one, or None."""
         cues = self.show_model.cues
         if not 0 <= row < len(cues) or not cues[row].parent:
             return None
         group = next((c for c in cues if c.kind == "group" and c.number == cues[row].parent), None)
-        if group is None or group.group_mode != "playlist":
+        if group is None or group_mode_of(group) != "playlist":
             return None
         children = [i for i, c in enumerate(cues) if c.parent == group.number]
         if row not in children or children.index(row) + 1 >= len(children):
@@ -3308,14 +3358,7 @@ class MainWindow(QMainWindow):
             self._advance(row)
             return
         if cue.kind == "group":
-            children = [i for i, child in enumerate(cues) if child.parent == cue.number]
-            if cue.group_mode == "playlist":
-                if children:
-                    self.go_row(children[0])
-            else:
-                for i in children:
-                    self.go_row(i)
-            self._advance(row)
+            self._start_group(row, cue)
             return
         if cue.kind == "control":
             self._control(cue)
