@@ -3878,6 +3878,9 @@ class MainWindow(QMainWindow):
 
         worker.done.connect(finished)
         dialog.canceled.connect(worker.requestInterruption)
+        # A QDialog starts hidden, so without this the download runs with nothing on screen.
+        dialog.show()
+        dialog.raise_()
         worker.start()
         self._update_worker = worker  # keep a reference while it runs
 
