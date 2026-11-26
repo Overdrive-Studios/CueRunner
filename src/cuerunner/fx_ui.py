@@ -7,7 +7,14 @@ whichever effect is selected rather than knowing about any of them.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QDoubleSpinBox, QGridLayout, QLabel, QWidget
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QDoubleSpinBox,
+    QGridLayout,
+    QLabel,
+    QPushButton,
+    QWidget,
+)
 
 from cuerunner import fx
 
@@ -18,12 +25,15 @@ class EffectParams(QWidget):
     """Controls for one effect's settings. Emits changed when the user moves one."""
 
     changed = Signal()
+    editor_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._busy = False
         self._kind = None
         self._spins: dict[str, QDoubleSpinBox] = {}
+        self._bypass: QCheckBox | None = None
+        self._open_editor: QPushButton | None = None
         self._grid = QGridLayout(self)
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._grid.setHorizontalSpacing(8)
@@ -46,7 +56,12 @@ class EffectParams(QWidget):
                 if item.widget() is not None:
                     item.widget().setParent(None)
             self._spins = {}
+            self._bypass = None
+            self._open_editor = None
             self._kind = kind
+            if kind == fx.VST_KIND:
+                self._build_plugin()
+                return
             spec = fx.EFFECTS.get(kind or "")
             if spec is None:
                 self._empty = QLabel("Add an effect to set it up.")
@@ -69,8 +84,29 @@ class EffectParams(QWidget):
         finally:
             self._busy = False
 
+    def _build_plugin(self) -> None:
+        """A plugin is set up in its own window, so there is nothing to show here but a way in."""
+        self._name = QLabel("")
+        self._open_editor = QPushButton("Open plugin window\u2026")
+        self._open_editor.clicked.connect(self.editor_requested)
+        self._bypass = QCheckBox("Bypass")
+        self._bypass.toggled.connect(self._emit)
+        self._grid.addWidget(self._name, 0, 0, 1, 3)
+        self._grid.addWidget(self._open_editor, 1, 0)
+        self._grid.addWidget(self._bypass, 1, 1)
+        self._grid.setColumnStretch(2, 1)
+
     def _load(self, effect: dict | None) -> None:
         if effect is None:
+            return
+        if str(effect.get("kind", "")) == fx.VST_KIND:
+            self._busy = True
+            try:
+                self._name.setText(str(effect.get("name") or "Plugin (not set)"))
+                if self._bypass is not None:
+                    self._bypass.setChecked(bool(effect.get("bypass", False)))
+            finally:
+                self._busy = False
             return
         spec = fx.EFFECTS.get(str(effect.get("kind", "")))
         if spec is None:
@@ -86,11 +122,17 @@ class EffectParams(QWidget):
 
     def values(self) -> dict:
         """What the controls currently say, ready to write back onto the effect."""
+        if self._kind == fx.VST_KIND:
+            return {"bypass": bool(self._bypass.isChecked())} if self._bypass else {}
         return {key: spin.value() for key, spin in self._spins.items()}
 
     def set_editable(self, editable: bool) -> None:
         for spin in self._spins.values():
             spin.setEnabled(editable)
+        if self._bypass is not None:
+            self._bypass.setEnabled(editable)
+        if self._open_editor is not None:
+            self._open_editor.setEnabled(editable)
 
     def _emit(self) -> None:
         if not self._busy:
