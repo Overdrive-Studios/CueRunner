@@ -153,6 +153,22 @@ def _default_patches() -> list[AudioPatch]:
     return [AudioPatch()]
 
 
+def _entries(data: dict, key: str) -> list:
+    """The list stored under this key, or nothing when the file holds something else."""
+    value = data.get(key, [])
+    return value if isinstance(value, list) else []
+
+
+def _build(kind, raw, allowed):
+    """Make one record from a show file, or None when it cannot be made sense of."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return kind(**{k: v for k, v in raw.items() if k in allowed})
+    except (TypeError, ValueError):
+        return None
+
+
 def _empty_pads() -> list[Pad]:
     return [Pad() for _ in range(PAD_COUNT)]
 
@@ -223,18 +239,29 @@ class Show:
     @classmethod
     def load(cls, path: Path) -> "Show":
         data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("This is not a CueRunner show file.")
         cue_fields = set(Cue.__dataclass_fields__)
         pad_fields = set(Pad.__dataclass_fields__)
         radio_fields = set(RadioSettings.__dataclass_fields__)
-        cues = [Cue(**{k: v for k, v in c.items() if k in cue_fields}) for c in data.get("cues", [])]
-        pads = [Pad(**{k: v for k, v in p.items() if k in pad_fields}) for p in data.get("pads", [])]
+        # A show written by another version, or edited by hand, may hold entries that do
+        # not fit. Those are passed over so the rest of the show still opens.
+        cues = [cue for cue in (_build(Cue, c, cue_fields) for c in _entries(data, "cues"))
+                if cue is not None]
+        pads = [pad for pad in (_build(Pad, p, pad_fields) for p in _entries(data, "pads"))
+                if pad is not None]
         pads = (pads + _empty_pads())[:PAD_COUNT]
-        radio = RadioSettings(**{k: v for k, v in data.get("radio", {}).items() if k in radio_fields})
+        radio_data = data.get("radio") if isinstance(data.get("radio"), dict) else {}
+        radio = (_build(RadioSettings, radio_data, radio_fields) or RadioSettings())
         patch_fields = set(AudioPatch.__dataclass_fields__)
-        patches = [AudioPatch(**{k: v for k, v in p.items() if k in patch_fields})
-                   for p in data.get("audio_patches", []) if isinstance(p, dict)]
-        midi_map = data.get("midi_map", DEFAULT_MIDI_MAP)
-        duck_level = min(1.0, max(0.0, float(data.get("duck_level", DEFAULT_DUCK_LEVEL))))
+        patches = [patch for patch in
+                   (_build(AudioPatch, p, patch_fields) for p in _entries(data, "audio_patches"))
+                   if patch is not None]
+        midi_map = data.get("midi_map") if isinstance(data.get("midi_map"), dict) else DEFAULT_MIDI_MAP
+        try:
+            duck_level = min(1.0, max(0.0, float(data.get("duck_level", DEFAULT_DUCK_LEVEL))))
+        except (TypeError, ValueError):
+            duck_level = DEFAULT_DUCK_LEVEL
         return cls(
             name=data.get("name", "Untitled Show"),
             cues=cues,
