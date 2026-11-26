@@ -59,6 +59,7 @@ class Cue:
     volume: float = 1.0  # Levels tab: the cue's own level, 0 to about 4 (0 dB = 1.0)
     effects: list = field(default_factory=list)  # Audio FX: the chain, in order
     rate: float = 1.0  # Time & Loops: playback speed; 1.0 is normal
+    preserve_pitch: bool = False  # Time & Loops: hold the pitch when the rate is changed
     integrated_fade: bool = False  # Time & Loops: shape the cue's fades with the curve below
     fade_curve: str = "linear"  # "linear" or "smooth"
     slices: list = field(default_factory=list)  # Time & Loops: slice points in seconds

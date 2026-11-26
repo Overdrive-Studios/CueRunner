@@ -391,6 +391,70 @@ class MultibandCompressor(Effect):
         return out
 
 
+class PitchShift(Effect):
+    """Moves the pitch up or down without changing how long the cue runs."""
+
+    def __init__(self, params: dict, rate: int, channels: int) -> None:
+        from cuerunner.pitch import PitchShifter, ratio_for
+
+        self.semitones = float(params.get("semitones", 0.0))
+        self._shifters = [PitchShifter(ratio_for(self.semitones)) for _ in range(channels)]
+        self._channels = channels
+        self._make = lambda: PitchShifter(ratio_for(self.semitones))
+
+    def flat(self) -> bool:
+        return abs(self.semitones) < 0.01
+
+    def process(self, block: np.ndarray) -> np.ndarray:
+        if block.shape[1] != self._channels:
+            self._channels = block.shape[1]
+            self._shifters = [self._make() for _ in range(self._channels)]
+        out = np.empty_like(block)
+        for channel, shifter in enumerate(self._shifters):
+            out[:, channel] = shifter.process(block[:, channel])
+        return out
+
+
+class RogerBeep(Effect):
+    """Puts a short beep on the end of each phrase, the way a two-way radio does."""
+
+    def __init__(self, params: dict, rate: int, channels: int) -> None:
+        self.rate = rate
+        self.threshold = float(params.get("threshold_db", -40.0))
+        self.freq = float(params.get("freq", 1000.0))
+        self.length = max(float(params.get("length_ms", 120.0)) / 1000, 0.01)
+        self.level = db_to_gain(float(params.get("level_db", -12.0)))
+        self._beep = self._make_beep()
+        self._was_loud = False
+        self._at = len(self._beep)  # not currently beeping
+        self._quiet_for = 0
+
+    def _make_beep(self) -> np.ndarray:
+        count = max(int(self.length * self.rate), 1)
+        t = np.arange(count) / self.rate
+        fade = np.minimum(np.minimum(t, self.length - t) / 0.005, 1.0).clip(0, 1)
+        return (np.sin(2 * np.pi * self.freq * t) * fade * self.level).astype(np.float32)
+
+    def process(self, block: np.ndarray) -> np.ndarray:
+        level = np.max(np.abs(block), axis=1)
+        loud = 20 * np.log10(np.maximum(level, 1e-7)) > self.threshold
+        out = block.astype(np.float32).copy()
+        for index in range(len(block)):
+            if loud[index]:
+                self._was_loud = True
+                self._quiet_for = 0
+            elif self._was_loud:
+                # A short gap is a pause; a longer one means the phrase has ended.
+                self._quiet_for += 1
+                if self._quiet_for > self.rate // 50:
+                    self._was_loud = False
+                    self._at = 0
+            if self._at < len(self._beep):
+                out[index] += self._beep[self._at]
+                self._at += 1
+        return out
+
+
 # --------------------------------------------------------------------------- the catalogue
 @dataclass(frozen=True)
 class EffectSpec:
@@ -460,6 +524,15 @@ EFFECT_LIST = [
         Param("drive", "Drive", 0.1, 50.0, 5.0, "", 1),
         MIX,
     ), lambda p, r, c: Distortion(p, r, c)),
+    EffectSpec("pitch", "Pitch shift", (
+        Param("semitones", "Shift", -24.0, 24.0, 0.0, " semitones", 1),
+    ), lambda p, r, c: PitchShift(p, r, c)),
+    EffectSpec("rogerbeep", "Roger beep", (
+        Param("threshold_db", "Threshold", -80.0, 0.0, -40.0, " dB", 1),
+        Param("freq", "Beep pitch", 200.0, 4000.0, 1000.0, " Hz", 0),
+        Param("length_ms", "Beep length", 20.0, 1000.0, 120.0, " ms", 0),
+        Param("level_db", "Beep level", -40.0, 0.0, -12.0, " dB", 1),
+    ), lambda p, r, c: RogerBeep(p, r, c)),
     EffectSpec("reverb", "Reverb", (
         Param("room", "Room size", 0.0, 100.0, 50.0, " %", 0),
         Param("damping", "Damping", 0.0, 95.0, 40.0, " %", 0),
