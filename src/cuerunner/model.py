@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from datetime import datetime
+import dataclasses
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -159,12 +160,73 @@ def _entries(data: dict, key: str) -> list:
     return value if isinstance(value, list) else []
 
 
+def _coerce(value, default):
+    """Bring a value from a show file to the type the field expects.
+
+    Show files are edited by hand, written by older versions, and occasionally damaged. A
+    number stored as text, or a whole number stored as 2.0, used to travel all the way to
+    a spin box or a format string and take the app down there. Anything that cannot be
+    made to fit falls back to the field's own default.
+    """
+    if isinstance(default, bool):
+        return value if isinstance(value, bool) else bool(value)
+    if isinstance(default, int):
+        try:
+            return int(round(float(value)))
+        except (TypeError, ValueError):
+            return default
+    if isinstance(default, float):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+    if isinstance(default, str):
+        return value if isinstance(value, str) else ("" if value is None else str(value))
+    if isinstance(default, list):
+        return value if isinstance(value, list) else list(default)
+    if isinstance(default, dict):
+        return value if isinstance(value, dict) else dict(default)
+    return value
+
+
+_BY_NAME = {"str": "", "int": 0, "float": 0.0, "bool": False, "list": [], "dict": {}}
+
+
+def _defaults(kind) -> dict:
+    """A stand-in value of the right type for each field, which is what coercion needs.
+
+    Usually the field's own default. A field with no default, such as a cue's number, has
+    its declared type read instead, so those are coerced too.
+    """
+    out = {}
+    for spec in dataclasses.fields(kind):
+        if spec.default is not dataclasses.MISSING:
+            out[spec.name] = spec.default
+        elif spec.default_factory is not dataclasses.MISSING:  # type: ignore[misc]
+            try:
+                out[spec.name] = spec.default_factory()  # type: ignore[misc]
+            except Exception:
+                pass
+        else:
+            name = spec.type if isinstance(spec.type, str) else getattr(spec.type, "__name__", "")
+            sample = _BY_NAME.get(name.split("|")[0].strip())
+            if sample is not None:
+                out[spec.name] = sample
+    return out
+
+
 def _build(kind, raw, allowed):
     """Make one record from a show file, or None when it cannot be made sense of."""
     if not isinstance(raw, dict):
         return None
+    defaults = _defaults(kind)
+    fields = {}
+    for key, value in raw.items():
+        if key not in allowed:
+            continue
+        fields[key] = _coerce(value, defaults[key]) if key in defaults else value
     try:
-        return kind(**{k: v for k, v in raw.items() if k in allowed})
+        return kind(**fields)
     except (TypeError, ValueError):
         return None
 

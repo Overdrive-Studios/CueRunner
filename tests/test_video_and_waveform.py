@@ -282,9 +282,11 @@ def test_a_file_the_engine_cannot_open_is_not_asked_about_twice(app, movie):
     probe.ready.connect(lambda path, ms: seen.append((path, ms)))
     try:
         probe.request(movie)
+        probe._current = movie
         probe._give_up()
         assert seen == [(movie, 0)]
-        assert probe.request(movie) == 0  # remembered as unknown rather than asked again
+        assert probe.request(movie) is None  # not asked again, but not written off either
+        assert video_probe.known_duration_ms(movie) is None
     finally:
         probe.close()
 

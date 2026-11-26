@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QTextEdit,
     QSpinBox,
+    QStyledItemDelegate,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -177,6 +178,7 @@ def _route_summary(route: list) -> str:
 
 def _format_duration(ms: int) -> str:
     """HH:MM:SS.mmm, as QLab shows durations."""
+    ms = int(ms)  # a position is fractional once a cue's rate is not 1.0
     if ms <= 0:
         return "00:00:00.000"
     hours, rest = divmod(ms, 3_600_000)
@@ -351,6 +353,12 @@ THEN_LABELS = {"none": "", "follow": "Follow", "continue": "Continue"}
 PLAYING_COLOUR = QColor(30, 84, 48)
 PLAYHEAD_MARK = "▶"
 
+# The cue list is typed into directly, as QLab's is: double click a cell and change it.
+# Each entry says how to read what was typed back onto the cue. A column not listed here
+# is shown but not edited, either because it is worked out (Length, Progress, Remaining)
+# or because it is a choice rather than free text (Then, which the C key cycles).
+EDITABLE_COLUMNS = ("#", "Name", "Pre-Wait", "Post-Wait", "Fade In", "Fade Out", "Hotkey")
+
 
 class _DownloadWorker(QThread):
     progress = Signal(int)
@@ -523,6 +531,26 @@ class RoutingDialog(QDialog):
         if all(not group for group in route):
             return []
         return route
+
+
+class CueCellDelegate(QStyledItemDelegate):
+    """Opens a cell's editor on the bare value, not on the decorated text.
+
+    The cue list dresses its cells up: a playhead arrow and a flag beside the number, an
+    indent on a child's name, a unit after a time. None of that should land in the box the
+    user types into, so the plain value is kept alongside and handed to the editor.
+    """
+
+    RAW = Qt.ItemDataRole.UserRole + 1
+
+    def setEditorData(self, editor, index) -> None:  # noqa: N802 - Qt naming
+        raw = index.data(self.RAW)
+        if raw is None or not hasattr(editor, "setText"):
+            super().setEditorData(editor, index)
+            return
+        editor.setText(str(raw))
+        if hasattr(editor, "selectAll"):
+            editor.selectAll()
 
 
 class CueDialog(QDialog):
@@ -938,8 +966,12 @@ class MainWindow(QMainWindow):
         self._timecode_runs: dict[int, tuple] = {}  # id(cue) -> (cue, generator, timer, port)
         self._dmx_last: dict[tuple[str, int], dict[int, int]] = {}
         self._video = video_out.VideoOutputs(self)
-        self._video_probe = video_probe.DurationProbe(self)
-        self._video_probe.ready.connect(self._video_duration_known)
+        try:
+            self._video_probe = video_probe.DurationProbe(self)
+            self._video_probe.ready.connect(self._video_duration_known)
+        except Exception:
+            # No media engine on this machine: video lengths stay unknown, nothing else breaks.
+            self._video_probe = None
         self._playing_cue: Cue | None = None
         self._row_bars: list[QProgressBar] = []
         self.mixer: Mixer | None = None
@@ -1011,7 +1043,8 @@ class MainWindow(QMainWindow):
         self._stop_timecode()
         self._stop_midifile()
         self._video.close()
-        self._video_probe.close()
+        if self._video_probe is not None:
+            self._video_probe.close()
         super().closeEvent(event)
 
     def _fit_to_screen(self) -> None:
@@ -1270,7 +1303,8 @@ class MainWindow(QMainWindow):
         seconds = cue.duration_ms / 1000 if cue.duration_ms else self._file_seconds(cue)
         # Video files go in too. Their wave usually cannot be read, but with the length
         # known the scale and the start and end markers still work, which is the point.
-        self.insp_wave.set_clip(cue.file if cue.kind in ("audio", "video") else "", seconds)
+        self.insp_wave.set_clip(cue.file if cue.kind in ("audio", "video") else "", seconds,
+                                wave=cue.kind == "audio")
         self.insp_wave.set_markers(cue.loop_in, cue.loop_out)
         self.insp_wave.set_range(cue.trim_in, cue.trim_out)
         self.insp_wave.set_slices(cue.slices)
@@ -1281,8 +1315,7 @@ class MainWindow(QMainWindow):
         if not cue.file:
             return 0.0
         if cue.kind == "video":
-            known = self._video_probe.request(cue.file)
-            return (known or 0) / 1000
+            return (self._ask_video_length(cue.file) or 0) / 1000
         if cue.kind != "audio":
             return 0.0
         try:
@@ -1843,9 +1876,10 @@ class MainWindow(QMainWindow):
         self.table.setHorizontalHeaderLabels(COLUMNS)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        # Double clicking a cue's name renames it in place; nothing else is typed into.
+        # Double clicking a cell changes it there and then, the way QLab does it. No dialog.
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
-        self.table.itemChanged.connect(self._name_edited)
+        self.table.setItemDelegate(CueCellDelegate(self.table))
+        self.table.itemChanged.connect(self._cell_edited)
         self.table.setShowGrid(False)
         self.table.setAlternatingRowColors(True)
         # A plain count down the left, so cues can be referred to by position as well as
@@ -1864,7 +1898,7 @@ class MainWindow(QMainWindow):
             self.table.setColumnWidth(col, width)
         for name in EXTRA_COLUMNS:
             self.table.setColumnHidden(COLUMNS.index(name), True)
-        self.table.itemDoubleClicked.connect(lambda item: self.edit_row(item.row()))
+        self.table.itemDoubleClicked.connect(self._cell_double_clicked)
         self.table.itemSelectionChanged.connect(self._remember_selected_row)
         self.table.itemSelectionChanged.connect(self._refresh_now_label)
         self.table.itemSelectionChanged.connect(self._refresh_inspector)
@@ -2449,6 +2483,11 @@ class MainWindow(QMainWindow):
         self._editing = editing
         self.edit_button.setChecked(editing)
         self.show_button.setChecked(not editing)
+        # The cue list is typed into directly, so the cells have to lock with the mode.
+        self.table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked if editing
+            else QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._refresh_table()
         self._refresh_inspector()
 
     def _refresh_title(self) -> None:
@@ -2463,7 +2502,24 @@ class MainWindow(QMainWindow):
         finally:
             self._refreshing = False
 
+    def _video_lengths(self) -> None:
+        """Fill in the length of every video cue, asking for the ones not yet known.
+
+        A cue created in this session is asked about as it is made, but one that came from
+        a show file is not, so without this a reopened show had no length on its video
+        cues and nothing to lay the Time & Loops scale against.
+        """
+        if self._video_probe is None:
+            return
+        for cue in self.show_model.all_cues():
+            if cue.kind != "video" or not cue.file or cue.duration_ms:
+                continue
+            known = self._ask_video_length(cue.file)
+            if known:
+                cue.duration_ms = known
+
     def _fill_table(self) -> None:
+        self._video_lengths()
         cues = self.show_model.cues
         if hasattr(self, "_saved_json"):
             self._refresh_title()  # the title carries a dot while there is unsaved work
@@ -2499,12 +2555,22 @@ class MainWindow(QMainWindow):
                 cue.hotkey,
                 self._target_text(cue),
             ]
+            raws = {
+                0: cue.number,
+                NAME_COL: cue.name,
+                2: f"{cue.pre_wait_ms / 1000:g}",
+                4: f"{cue.post_wait_ms / 1000:g}",
+                5: f"{cue.fade_in:g}",
+                6: f"{cue.fade_out:g}",
+                11: cue.hotkey,
+            }
             for col, value in enumerate(values):
                 if col == PROGRESS_COL:
                     continue
                 item = QTableWidgetItem(value)
-                if col == NAME_COL:
+                if self._editing and COLUMNS[col] in EDITABLE_COLUMNS:
                     item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                    item.setData(CueCellDelegate.RAW, raws.get(col, value))
                 else:
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if row == playing_row:
@@ -2886,9 +2952,15 @@ class MainWindow(QMainWindow):
         """What has gone wrong lately, newest last."""
         return list(self._problems)
 
-    def _name_edited(self, item) -> None:
-        """A name typed into the cue list goes straight onto the cue."""
-        if self._refreshing or item.column() != NAME_COL:
+    def _cell_edited(self, item) -> None:
+        """Something typed into the cue list goes straight onto the cue.
+
+        Anything the cue will not take is put back as it was rather than half applied.
+        """
+        if self._refreshing or not self._editing:
+            return
+        column = COLUMNS[item.column()] if item.column() < len(COLUMNS) else ""
+        if column not in EDITABLE_COLUMNS:
             return
         row = item.row()
         cues = self.show_model.cues
@@ -2896,14 +2968,84 @@ class MainWindow(QMainWindow):
             return
         cue = cues[row]
         typed = item.text().strip()
-        if not typed or typed == cue.name:
-            item.setText(("    " if cue.parent else "") + cue.name)  # put back what it was
-            return
-        self._remember("Rename")
-        cue.name = typed
+        label = {"#": "Renumber", "Name": "Rename"}.get(column, f"Edit {column}")
+        # The undo step has to be taken before the change, so it holds the old value.
+        self._remember(label)
+        took = self._apply_cell(cue, column, typed)
+        if not took and self._undo:
+            self._undo.pop()  # nothing changed, so there is nothing to undo
+            self._refresh_undo_actions()
+        # Rebuilding the table destroys the very item whose signal this is, so it waits
+        # until Qt is finished with the edit. Either way the row is redrawn: from what the
+        # cue now says, or from what it still says if the typing was no good.
+        QTimer.singleShot(0, lambda: self._redraw_after_edit(row))
+
+    def _redraw_after_edit(self, row: int) -> None:
+        self._refresh_table()
+        if 0 <= row < len(self.show_model.cues):
+            self.table.selectRow(row)
         self._refresh_inspector()
         self._refresh_now_label()
         self._refresh_title()
+
+    def _apply_cell(self, cue: Cue, column: str, typed: str) -> bool:
+        """Put a typed cell onto the cue. False means it was not usable and nothing changed."""
+        if column == "Name":
+            if not typed or typed == cue.name:
+                return False
+            cue.name = typed
+            return True
+        if column == "#":
+            if not typed or typed == cue.number:
+                return False
+            if any(other is not cue and other.number == typed for other in self.show_model.all_cues()):
+                # Quietly refuse: a dialog in the middle of typing down a cue list is worse
+                # than the cell simply snapping back to what it was.
+                self._cue_problem("Cannot renumber cue",
+                                  f"Another cue is already number {typed}.",
+                                  modal_when_editing=False)
+                return False
+            old = cue.number
+            cue.number = typed
+            for child in self.show_model.all_cues():  # children follow their group
+                if child.parent == old:
+                    child.parent = typed
+            return True
+        if column == "Hotkey":
+            if typed == cue.hotkey:
+                return False
+            cue.hotkey = typed
+            return True
+        try:
+            seconds = max(0.0, float(typed.rstrip(" s").strip() or 0))
+        except ValueError:
+            return False
+        if column == "Pre-Wait":
+            if int(seconds * 1000) == cue.pre_wait_ms:
+                return False
+            cue.pre_wait_ms = int(seconds * 1000)
+        elif column == "Post-Wait":
+            if int(seconds * 1000) == cue.post_wait_ms:
+                return False
+            cue.post_wait_ms = int(seconds * 1000)
+        elif column == "Fade In":
+            if seconds == cue.fade_in:
+                return False
+            cue.fade_in = seconds
+        elif column == "Fade Out":
+            if seconds == cue.fade_out:
+                return False
+            cue.fade_out = seconds
+        else:
+            return False
+        return True
+
+    def _cell_double_clicked(self, item) -> None:
+        """Double clicking the File column picks a new file; every other cell edits in place."""
+        if not self._editing:
+            return
+        if item.column() == len(COLUMNS) - 1:
+            self.edit_row(item.row())
 
     def _remember_selected_row(self) -> None:
         row = self._selected_row()
@@ -3542,7 +3684,7 @@ class MainWindow(QMainWindow):
             return
         if cue.kind == "video":
             # The media engine answers in its own time, so this comes back later.
-            known = self._video_probe.request(cue.file)
+            known = self._ask_video_length(cue.file)
             if known is not None:
                 cue.duration_ms = known
             return
@@ -3552,6 +3694,15 @@ class MainWindow(QMainWindow):
             cue.duration_ms = probe_duration_ms(cue.file)
         except Exception:
             cue.duration_ms = 0
+
+    def _ask_video_length(self, path: str) -> int | None:
+        """How long this video is, if it is known; otherwise set the question going."""
+        if self._video_probe is None:
+            return None
+        try:
+            return self._video_probe.request(path)
+        except Exception:
+            return None
 
     def _video_duration_known(self, path: str, duration_ms: int) -> None:
         """A video's length has come back: put it on every cue that uses that file."""

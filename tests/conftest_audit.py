@@ -23,6 +23,31 @@ KINDS = ["audio", "video", "camera", "group", "memo", "midi", "osc", "light", "n
          "spotify", "console", "midifile", "program"]
 
 
+def write_video(folder) -> str:
+    """A real, playable video file if this machine can make one, else "".
+
+    A made-up file is worse than none: the fault it finds belongs to the broken file, not
+    to the app, and the real crash was on real files.
+    """
+    import shutil
+    import subprocess
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return ""
+    path = folder / "clip.mp4"
+    try:
+        subprocess.run(
+            [ffmpeg, "-y", "-f", "lavfi", "-i", "testsrc=duration=4:size=160x120:rate=10",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-shortest", str(path)],
+            capture_output=True, timeout=120, check=True)
+    except Exception:
+        return ""
+    return str(path) if path.exists() else ""
+
+
 def write_tones(folder):
     mono = folder / "mono.wav"
     stereo = folder / "stereo.wav"
@@ -32,25 +57,6 @@ def write_tones(folder):
                                0.4 * np.sin(2 * np.pi * 330 * seconds)],
                               axis=1).astype("float32"), RATE)
     return str(mono), str(stereo)
-
-
-class _StubProbe:
-    """The duration probe has its own tests; here it would spin up a media pipeline.
-
-    Asking a media backend about a file that is not really a video is a good way to take a
-    headless test machine down, and that says nothing about the app.
-    """
-
-    ready = None
-
-    def __init__(self, parent=None) -> None:
-        self.ready = mock.Mock()
-        self.ready.connect = lambda *a, **k: None
-
-    def request(self, path):  # noqa: D102 - matches DurationProbe
-        return None
-
-    def close(self) -> None: ...
 
 
 class _StubVideoOutput:
@@ -71,7 +77,7 @@ class _StubVideoOutput:
 @contextlib.contextmanager
 def quiet_modals():
     """Answer every dialog instead of showing it, so a headless run never blocks."""
-    from cuerunner import video_out, video_probe
+    from cuerunner import video_out
 
     ok = QMessageBox.StandardButton.Ok
     with mock.patch.object(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", ""))), \
@@ -87,12 +93,11 @@ def quiet_modals():
          mock.patch.object(QInputDialog, "getItem", staticmethod(lambda *a, **k: ("", False))), \
          mock.patch.object(QInputDialog, "getInt", staticmethod(lambda *a, **k: (0, False))), \
          mock.patch.object(QDialog, "exec", lambda self: QDialog.DialogCode.Rejected), \
-         mock.patch.object(video_out, "_Output", _StubVideoOutput), \
-         mock.patch.object(video_probe, "DurationProbe", _StubProbe):
+         mock.patch.object(video_out, "_Output", _StubVideoOutput):
         yield
 
 
-def build_window(mono: str, stereo: str) -> MainWindow:
+def build_window(mono: str, stereo: str, movie: str = "") -> MainWindow:
     """A window with a working mixer and a cue of every kind, but no sound card."""
     def fake_output(self):
         self.mixer = Mixer(rate=RATE, out_channels=2)
@@ -105,7 +110,8 @@ def build_window(mono: str, stereo: str) -> MainWindow:
     for index, kind in enumerate(KINDS, start=1):
         window.show_model.cues.append(Cue(
             number=str(index), name=f"{kind} cue", kind=kind,
-            file=(mono if index % 2 else stereo) if kind in ("audio", "video") else "",
+            file=(movie or stereo) if kind == "video"
+            else ((mono if index % 2 else stereo) if kind == "audio" else ""),
         ))
     window.show_model.cue_lists.append(CueList(name="Cart", kind="cart"))
     window._editing = True
