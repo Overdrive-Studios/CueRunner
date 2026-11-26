@@ -224,41 +224,16 @@ def test_a_looping_video_cue_asks_for_endless_loops(app, window):
     assert play.call_args.kwargs["loops"] == 0
 
 
-def test_the_output_window_is_brought_to_the_front(app):
-    """On one display the output opened behind the main window: sound, no picture."""
-    from cuerunner import video_out
-
-    output = video_out._Output.__new__(video_out._Output)
-    output.widget = mock.Mock()
-    output.widget.windowHandle.return_value = mock.Mock()
-    output.screen = mock.Mock()
-    video_out._Output.show_on_screen(output, "fit")
-    assert output.widget.showFullScreen.called
-    assert output.widget.raise_.called
-    # and it must not take the keyboard away from the main window
-    assert not output.widget.activateWindow.called
-
-
-def test_the_video_stops_at_its_end_time(app):
-    from cuerunner import video_out
-
-    output = video_out._Output.__new__(video_out._Output)
-    output.player = mock.Mock()
-    output.stop_at_ms = 5_000
-    video_out._Output._check_end(output, 4_000)
-    assert not output.player.stop.called
-    video_out._Output._check_end(output, 5_100)
-    assert output.player.stop.called
-    assert output.stop_at_ms == 0  # and only once
-
-
 def test_a_video_with_no_end_time_plays_right_through(app):
+    """How the output window itself behaves is covered in test_video_output.py."""
     from cuerunner import video_out
 
     output = video_out._Output.__new__(video_out._Output)
     output.player = mock.Mock()
     output.stop_at_ms = 0
-    video_out._Output._check_end(output, 10_000_000)
+    with mock.patch.object(video_out.QTimer, "singleShot") as later:
+        video_out._Output._check_end(output, 10_000_000)
+    assert not later.called
     assert not output.player.stop.called
 
 

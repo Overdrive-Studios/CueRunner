@@ -8,7 +8,7 @@ Each display gets one window, created the first time a cue uses it.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, Qt, QUrl
+from PySide6.QtCore import QObject, Qt, QTimer, QUrl
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QLabel
 from PySide6.QtMultimedia import QAudioOutput, QCamera, QMediaCaptureSession, QMediaDevices, QMediaPlayer
@@ -99,24 +99,49 @@ def _find_camera(name: str):
     return None
 
 
+def _stage_window(widget, screen) -> None:
+    """Dress a window up as a video output: frameless, full screen, above the app.
+
+    Deliberately not showFullScreen(). On a Mac that asks for a native full screen Space,
+    and a window hidden out of one leaves the Space behind: the screen stays black after
+    the cue has stopped. A frameless window the size of the screen, kept on top, covers
+    the display just the same and goes away the moment it is hidden.
+    """
+    # Frameless, above the app, and never taking the keyboard: GO and Panic have to keep
+    # working while a video plays. Only set when they are not already right, because
+    # changing a window's flags tears its native window down and builds it again.
+    wanted = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+              | Qt.WindowType.WindowDoesNotAcceptFocus)
+    if (widget.windowFlags() & wanted) != wanted:
+        widget.setWindowFlags(widget.windowFlags() | wanted)
+    widget.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+    widget.setScreen(screen)
+    widget.setGeometry(screen.geometry())
+    widget.show()
+    handle = widget.windowHandle()
+    if handle is not None:
+        handle.setScreen(screen)
+        handle.setGeometry(screen.geometry())
+    widget.raise_()
+
+
 class _Output:
     def __init__(self, screen) -> None:
         self.widget = QVideoWidget()
-        self.widget.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
-        # The output must never steal the keyboard from the main window during a show.
-        self.widget.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
-        self.widget.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.audio = QAudioOutput()
         self.player = QMediaPlayer()
         self.player.setAudioOutput(self.audio)
-        self.player.setVideoOutput(self.widget)
+        # The player and the camera session cannot both hold the widget: whichever is set
+        # second takes the video sink and the other one draws nothing. That is why a video
+        # cue played its sound over a black screen. They are swapped as they are used.
         self.session = QMediaCaptureSession()
-        self.session.setVideoOutput(self.widget)
+        self.showing = ""  # "video", "camera", "text" or "" for nothing on screen
         self.camera: QCamera | None = None
         self.cue_number = ""
         self.stop_at_ms = 0  # where the cue's end time falls, or 0 to play to the end
         self.text_window: QLabel | None = None
         self.player.positionChanged.connect(self._check_end)
+        self.player.mediaStatusChanged.connect(self._check_finished)
         self.widget.setGeometry(screen.geometry())
         self.screen = screen
 
@@ -131,13 +156,9 @@ class _Output:
         font.setPointSize(max(8, size))
         self.text_window.setFont(font)
         self.text_window.setText(text)
-        self.text_window.setScreen(self.screen)
-        self.text_window.setGeometry(self.screen.geometry())
-        self.text_window.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        self.text_window.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
-        self.text_window.showFullScreen()
-        self.text_window.raise_()
+        _stage_window(self.text_window, self.screen)
         self.widget.hide()
+        self.showing = "text"
 
     def hide_text(self) -> None:
         if self.text_window is not None:
@@ -145,24 +166,43 @@ class _Output:
 
     def show_on_screen(self, fit: str) -> None:
         self.widget.setAspectRatioMode(
-            Qt.AspectRatioMode.KeepAspectRatio if fit == "fit" else Qt.AspectRatioMode.IgnoreAspectRatio
+            Qt.AspectRatioMode.KeepAspectRatio if fit == "fit"
+            else Qt.AspectRatioMode.IgnoreAspectRatio
         )
-        self.widget.setScreen(self.screen)
-        self.widget.setGeometry(self.screen.geometry())
-        self.widget.showFullScreen()
-        # On the same display as the app itself, the output window opens behind the main
-        # window, so the sound plays and nothing appears. Bring it to the front, without
-        # taking the keyboard off the main window: GO and Panic have to keep working.
-        handle = self.widget.windowHandle()
-        if handle is not None:
-            handle.setScreen(self.screen)
-        self.widget.raise_()
+        _stage_window(self.widget, self.screen)
+
+    def take_sink(self, who: str) -> None:
+        """Give the widget to the player or to the camera, never to both at once."""
+        if who == "video":
+            self.session.setVideoOutput(None)
+            self.player.setVideoOutput(self.widget)
+        elif who == "camera":
+            self.player.setVideoOutput(None)
+            self.session.setVideoOutput(self.widget)
+        self.showing = who
+
+    def blank(self) -> None:
+        """Take everything off the display and let the desktop back."""
+        self.player.stop()
+        self.stop_camera()
+        self.hide_text()
+        self.widget.hide()
+        self.showing = ""
 
     def _check_end(self, position_ms: int) -> None:
-        """Stop at the cue's end time, which the media player knows nothing about."""
+        """Stop at the cue's end time, which the media player knows nothing about.
+
+        Deferred: stopping a player from inside its own position signal is a call back
+        into the media engine while it is still in the middle of its own work.
+        """
         if self.stop_at_ms and position_ms >= self.stop_at_ms:
             self.stop_at_ms = 0
-            self.player.stop()
+            QTimer.singleShot(0, self.blank)
+
+    def _check_finished(self, status) -> None:
+        """When the video runs out, take it off the screen rather than leaving a still."""
+        if status == QMediaPlayer.MediaStatus.EndOfMedia and self.showing == "video":
+            QTimer.singleShot(0, self.blank)
 
     def stop_camera(self) -> None:
         if self.camera is not None:
@@ -205,6 +245,7 @@ class VideoOutputs(QObject):
         out = self._output_for(output, routes or [])
         out.stop_camera()
         out.hide_text()
+        out.take_sink("video")  # the player draws into the widget, not the camera session
         out.cue_number = number
         out.stop_at_ms = int(end * 1000) if end > 0 else 0
         out.audio.setVolume(max(0.0, min(1.0, float(volume))))
@@ -222,6 +263,7 @@ class VideoOutputs(QObject):
         out = self._output_for(output, routes or [])
         out.player.stop()
         out.hide_text()
+        out.take_sink("camera")  # now the camera draws into the widget instead
         if out.camera is None:
             out.camera = QCamera(device)
         else:
@@ -248,16 +290,14 @@ class VideoOutputs(QObject):
         out.show_text(text, size)
 
     def stop_all(self) -> None:
+        """Clear every display. Nothing is left covering the screen."""
         for out in self._outputs.values():
-            out.player.stop()
-            out.stop_camera()
-            out.hide_text()
-            out.widget.hide()
+            out.blank()
 
     def close(self) -> None:
         for out in self._outputs.values():
-            out.player.stop()
-            out.stop_camera()
-            out.hide_text()
+            out.blank()
+            if out.text_window is not None:
+                out.text_window.close()
             out.widget.close()
         self._outputs.clear()
