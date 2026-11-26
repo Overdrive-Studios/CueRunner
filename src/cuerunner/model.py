@@ -47,7 +47,7 @@ class Cue:
     font_size: int = 96  # text cues: point size on the display
     parent: str = ""  # the number of the group cue this cue belongs to
     protocol: str = "artnet"  # light cues: "artnet" or "sacn"; network cues: "udp" or "tcp"
-    group_mode: str = "all"  # group cues: "all" fires every child; "playlist" runs them one after another
+    group_mode: str = "timeline"  # see GROUP_MODES; "all" from older shows means "timeline"
     universe: int = 0  # light cues: the Art-Net universe
     opacity: float = 1.0  # video cues: 0 to 1, applied to the output window while the cue plays
     loop_in: float = 0.0  # seconds: where a loop starts (0 for the start of the file)
@@ -175,6 +175,18 @@ def _empty_pads() -> list[Pad]:
 
 # A cart is a grid of cues with no playhead and no order, meant for firing things as
 # and when you want them. A list is the ordinary ordered cue list.
+# How a group cue behaves when it is started, following QLab's five modes.
+GROUP_MODES = ("timeline", "playlist", "start_first_enter", "start_first", "start_random")
+
+
+def group_mode_of(cue) -> str:
+    """A group's mode, treating the older "all" as the timeline mode it was."""
+    mode = getattr(cue, "group_mode", "timeline")
+    if mode == "all":
+        return "timeline"
+    return mode if mode in GROUP_MODES else "timeline"
+
+
 LIST_KINDS = ("list", "cart")
 CART_COLUMNS = 8
 CART_ROWS = 4
