@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
@@ -72,6 +72,7 @@ class WaveformView(QWidget):
     """
 
     markersChanged = Signal(float, float)
+    rangeChanged = Signal(float, float)  # the start and end time, in seconds
     seeked = Signal(float)  # a click in the body of the waveform, in seconds
     GRAB_PIXELS = 6  # how close a click must be to grab a marker
 
@@ -84,8 +85,10 @@ class WaveformView(QWidget):
         self._duration = 0.0
         self._loop_in = 0.0
         self._loop_out = 0.0
+        self._start = 0.0
+        self._end = 0.0  # 0 means the end of the file, which is how cues store it
         self._message = "No audio file"
-        self._dragging = ""  # "in", "out" or "" while nothing is being dragged
+        self._dragging = ""  # which marker is being dragged, "" while none is
         self._slices: list[float] = []
         self._playhead = 0.0  # where the cue is up to, or where it was last clicked
 
@@ -126,6 +129,14 @@ class WaveformView(QWidget):
     def markers(self) -> tuple[float, float]:
         return self._loop_in, self._loop_out
 
+    def set_range(self, start: float, end: float) -> None:
+        """Where the cue starts and ends in the file. An end of 0 means the file's end."""
+        self._start, self._end = max(0.0, float(start)), max(0.0, float(end))
+        self.update()
+
+    def range(self) -> tuple[float, float]:
+        return self._start, self._end
+
     def is_dragging(self) -> bool:
         """True while a marker is being dragged, so a refresh does not fight the mouse."""
         return bool(self._dragging)
@@ -133,10 +144,22 @@ class WaveformView(QWidget):
     def has_waveform(self) -> bool:
         return len(self._peaks) > 0
 
+    def is_usable(self) -> bool:
+        """True once the length is known, even if the file's wave cannot be drawn.
+
+        A video file, or an audio format the wave reader cannot open, still gets its scale
+        and its markers, so the start and end can be set by dragging either way.
+        """
+        return self._duration > 0
+
     # --- geometry -------------------------------------------------------
     def _out_seconds(self) -> float:
         """The loop out as a real time: 0 means the end of the file."""
         return self._loop_out if self._loop_out > 0 else self._duration
+
+    def _end_seconds(self) -> float:
+        """The cue's end as a real time: 0 means the end of the file."""
+        return self._end if self._end > 0 else self._duration
 
     def _x_for(self, seconds: float) -> float:
         if self._duration <= 0:
@@ -188,7 +211,7 @@ class WaveformView(QWidget):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#2e2e32"))
         middle = self.RULER + (self.height() - self.RULER) / 2
-        if self._message:
+        if not self.is_usable():
             painter.setPen(QColor("#8a8a90"))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._message)
             return
@@ -200,17 +223,31 @@ class WaveformView(QWidget):
             painter.fillRect(int(start_x), self.RULER, int(end_x - start_x),
                              self.height() - self.RULER, QColor("#36507a"))
 
-        painter.setPen(QPen(QColor("#8ab4f8"), 1))
-        count = len(self._peaks)
         width = max(self.width(), 1)
-        reach = (self.height() - self.RULER) / 2 - 2
-        for x in range(width):
-            low, high = self._peaks[min(int(x / width * count), count - 1)]
-            painter.drawLine(QPointF(x, middle - float(high) * reach),
-                             QPointF(x, middle - float(low) * reach))
+        if self.has_waveform():
+            painter.setPen(QPen(QColor("#8ab4f8"), 1))
+            count = len(self._peaks)
+            reach = (self.height() - self.RULER) / 2 - 2
+            for x in range(width):
+                low, high = self._peaks[min(int(x / width * count), count - 1)]
+                painter.drawLine(QPointF(x, middle - float(high) * reach),
+                                 QPointF(x, middle - float(low) * reach))
+        else:
+            # No wave to draw, but the scale and the markers are still worth having.
+            painter.setPen(QColor("#6a6a72"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._message)
 
         painter.setPen(QPen(QColor("#5a5a60"), 1))
         painter.drawLine(QPointF(0, middle), QPointF(width, middle))
+
+        # Everything before the start and after the end is shaded off: it does not play.
+        begin_x, finish_x = self._x_for(self._start), self._x_for(self._end_seconds())
+        shade = QColor(18, 18, 20, 140)
+        if begin_x > 0:
+            painter.fillRect(0, self.RULER, int(begin_x), self.height() - self.RULER, shade)
+        if finish_x < width:
+            painter.fillRect(int(finish_x), self.RULER, int(width - finish_x),
+                             self.height() - self.RULER, shade)
         for mark in self._slices:
             painter.setPen(QPen(QColor("#c9d1d9"), 1, Qt.PenStyle.DashLine))
             x = self._x_for(mark)
@@ -218,6 +255,13 @@ class WaveformView(QWidget):
         for x in (start_x, end_x):
             painter.setPen(QPen(QColor("#f2c14e"), 2))
             painter.drawLine(QPointF(x, self.RULER), QPointF(x, self.height()))
+        # The start and end of the cue, with a handle at the top to grab them by.
+        for x in (begin_x, finish_x):
+            painter.setPen(QPen(QColor("#58c470"), 2))
+            painter.drawLine(QPointF(x, self.RULER), QPointF(x, self.height()))
+            painter.setBrush(QColor("#58c470"))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRect(QRectF(x - 3, self.RULER, 6, 6))
 
         # Where the cue is up to, with the time written on the scale above it.
         head_x = self._x_for(self._playhead)
@@ -235,14 +279,18 @@ class WaveformView(QWidget):
 
     # --- dragging -------------------------------------------------------
     def _grab(self, x: float) -> str:
-        if abs(x - self._x_for(self._loop_in)) <= self.GRAB_PIXELS:
-            return "in"
-        if abs(x - self._x_for(self._out_seconds())) <= self.GRAB_PIXELS:
-            return "out"
-        return ""
+        """Which marker a press at this point takes hold of, nearest first."""
+        near = [
+            ("start", abs(x - self._x_for(self._start))),
+            ("end", abs(x - self._x_for(self._end_seconds()))),
+            ("in", abs(x - self._x_for(self._loop_in))),
+            ("out", abs(x - self._x_for(self._out_seconds()))),
+        ]
+        name, distance = min(near, key=lambda pair: pair[1])
+        return name if distance <= self.GRAB_PIXELS else ""
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        if not self.isEnabled() or not self.has_waveform():
+        if not self.isEnabled() or not self.is_usable():
             return
         x = event.position().x()
         grabbed = self._grab(x)
@@ -269,6 +317,18 @@ class WaveformView(QWidget):
         elif self._dragging == "out":
             # Dropping the out marker at the very end stores 0, meaning "to the end of the file".
             self._loop_out = 0.0 if seconds >= self._duration else max(seconds, self._loop_in + 0.001)
+        elif self._dragging == "start":
+            self._start = min(seconds, max(self._end_seconds() - 0.001, 0.0))
+            self._playhead = self._start  # the cue will begin here, so show it there
+            self.update()
+            self.rangeChanged.emit(self._start, self._end)
+            return
+        elif self._dragging == "end":
+            # At the very end this stores 0, meaning "play to the end of the file".
+            self._end = 0.0 if seconds >= self._duration else max(seconds, self._start + 0.001)
+            self.update()
+            self.rangeChanged.emit(self._start, self._end)
+            return
         else:
             return
         self.update()

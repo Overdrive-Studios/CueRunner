@@ -103,6 +103,9 @@ class _Output:
     def __init__(self, screen) -> None:
         self.widget = QVideoWidget()
         self.widget.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        # The output must never steal the keyboard from the main window during a show.
+        self.widget.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
+        self.widget.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.audio = QAudioOutput()
         self.player = QMediaPlayer()
         self.player.setAudioOutput(self.audio)
@@ -111,7 +114,9 @@ class _Output:
         self.session.setVideoOutput(self.widget)
         self.camera: QCamera | None = None
         self.cue_number = ""
+        self.stop_at_ms = 0  # where the cue's end time falls, or 0 to play to the end
         self.text_window: QLabel | None = None
+        self.player.positionChanged.connect(self._check_end)
         self.widget.setGeometry(screen.geometry())
         self.screen = screen
 
@@ -128,6 +133,8 @@ class _Output:
         self.text_window.setText(text)
         self.text_window.setScreen(self.screen)
         self.text_window.setGeometry(self.screen.geometry())
+        self.text_window.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.text_window.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
         self.text_window.showFullScreen()
         self.text_window.raise_()
         self.widget.hide()
@@ -143,6 +150,19 @@ class _Output:
         self.widget.setScreen(self.screen)
         self.widget.setGeometry(self.screen.geometry())
         self.widget.showFullScreen()
+        # On the same display as the app itself, the output window opens behind the main
+        # window, so the sound plays and nothing appears. Bring it to the front, without
+        # taking the keyboard off the main window: GO and Panic have to keep working.
+        handle = self.widget.windowHandle()
+        if handle is not None:
+            handle.setScreen(self.screen)
+        self.widget.raise_()
+
+    def _check_end(self, position_ms: int) -> None:
+        """Stop at the cue's end time, which the media player knows nothing about."""
+        if self.stop_at_ms and position_ms >= self.stop_at_ms:
+            self.stop_at_ms = 0
+            self.player.stop()
 
     def stop_camera(self) -> None:
         if self.camera is not None:
@@ -174,12 +194,25 @@ class VideoOutputs(QObject):
         out = self._output_for(output, routes or [])
         out.widget.setWindowOpacity(max(0.0, min(1.0, float(opacity))))
 
-    def play(self, output: str, path: str, routes: list[dict] | None = None, number: str = "") -> None:
+    def play(self, output: str, path: str, routes: list[dict] | None = None, number: str = "",
+             start: float = 0.0, end: float = 0.0, volume: float = 1.0,
+             rate: float = 1.0, loops: int = 1) -> None:
+        """Play a video, honouring the cue's start and end, level, rate and play count.
+
+        These all used to be ignored, so a video cue played the whole file at full level
+        however the inspector was set.
+        """
         out = self._output_for(output, routes or [])
         out.stop_camera()
         out.hide_text()
         out.cue_number = number
+        out.stop_at_ms = int(end * 1000) if end > 0 else 0
+        out.audio.setVolume(max(0.0, min(1.0, float(volume))))
+        out.player.setPlaybackRate(rate if rate and rate > 0 else 1.0)
+        out.player.setLoops(QMediaPlayer.Loops.Infinite if loops <= 0 else max(1, int(loops)))
         out.player.setSource(QUrl.fromLocalFile(path))
+        if start > 0:
+            out.player.setPosition(int(start * 1000))
         out.player.play()
 
     def show_camera(self, output: str, camera_name: str, routes: list[dict] | None = None) -> None:

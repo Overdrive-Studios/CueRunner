@@ -34,6 +34,25 @@ def write_tones(folder):
     return str(mono), str(stereo)
 
 
+class _StubProbe:
+    """The duration probe has its own tests; here it would spin up a media pipeline.
+
+    Asking a media backend about a file that is not really a video is a good way to take a
+    headless test machine down, and that says nothing about the app.
+    """
+
+    ready = None
+
+    def __init__(self, parent=None) -> None:
+        self.ready = mock.Mock()
+        self.ready.connect = lambda *a, **k: None
+
+    def request(self, path):  # noqa: D102 - matches DurationProbe
+        return None
+
+    def close(self) -> None: ...
+
+
 class _StubVideoOutput:
     """QAudioOutput needs a sound device, which a test machine may not have."""
 
@@ -52,7 +71,7 @@ class _StubVideoOutput:
 @contextlib.contextmanager
 def quiet_modals():
     """Answer every dialog instead of showing it, so a headless run never blocks."""
-    from cuerunner import video_out
+    from cuerunner import video_out, video_probe
 
     ok = QMessageBox.StandardButton.Ok
     with mock.patch.object(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", ""))), \
@@ -68,7 +87,8 @@ def quiet_modals():
          mock.patch.object(QInputDialog, "getItem", staticmethod(lambda *a, **k: ("", False))), \
          mock.patch.object(QInputDialog, "getInt", staticmethod(lambda *a, **k: (0, False))), \
          mock.patch.object(QDialog, "exec", lambda self: QDialog.DialogCode.Rejected), \
-         mock.patch.object(video_out, "_Output", _StubVideoOutput):
+         mock.patch.object(video_out, "_Output", _StubVideoOutput), \
+         mock.patch.object(video_probe, "DurationProbe", _StubProbe):
         yield
 
 
