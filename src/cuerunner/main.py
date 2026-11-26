@@ -1540,6 +1540,7 @@ class MainWindow(QMainWindow):
         cue.output_mutes = mutes
         cue.output_solos = solos
         cue.patch = self.insp_patch.currentData() or ""
+        self._live_levels(cue)  # a fader moves the sound now, not next time the cue runs
         cue.fade_in = self.insp_fade_in.value()
         cue.fade_out = self.insp_fade_out.value()
         cue.trim_in = self.insp_start_time.value()
@@ -3369,9 +3370,33 @@ class MainWindow(QMainWindow):
         voice.rate = cue.rate or 1.0
         voice.curve = cue.fade_curve if cue.integrated_fade else "linear"
         voice.fx = self._cue_eq(cue, clip.channels)
+        self._apply_output_gains(voice, cue, clip)
+
+    def _apply_output_gains(self, voice: Voice, cue: Cue, clip) -> None:
+        """Rebuild the voice's routing matrix from the cue's route and its output faders.
+
+        Built from the route each time rather than scaled in place, so moving a fader twice
+        does not multiply the first move in again.
+        """
         outs = voice.matrix.shape[1]
-        voice.matrix = voice.matrix * output_gains(cue.output_levels, cue.output_mutes,
-                                                   cue.output_solos, outs)[None, :]
+        base = route_matrix(cue.route, clip.channels, outs)
+        voice.matrix = base * output_gains(cue.output_levels, cue.output_mutes,
+                                           cue.output_solos, outs)[None, :]
+
+    def _live_levels(self, cue: Cue) -> None:
+        """Push the Levels tab onto whatever this cue is playing right now.
+
+        QLab's faders move the sound as you drag them. Ours only took effect the next time
+        the cue was started, which made them look like they did nothing at all.
+        """
+        if self.mixer is None:
+            return
+        gain = max(0.0, cue.volume) * fx.db_to_gain(cue.trim_db)
+        for voice in self._cue_voices:
+            if voice.tag is not cue or voice.done:
+                continue
+            voice.gain = gain
+            self._apply_output_gains(voice, cue, voice.clip)
 
     def _start_midifile(self, cue: Cue) -> None:
         """Play the cue's MIDI file out to its port. It plays on in the background until it ends or Stop or Panic."""
@@ -3881,8 +3906,10 @@ class MainWindow(QMainWindow):
             return
 
         rate = self.mixer.rate
-        position_ms = voice.position * 1000 // rate
-        duration_ms = voice.clip.frames * 1000 // rate
+        # voice.position is fractional once the cue's rate is not 1.0, and these go on to
+        # format strings and to setValue, neither of which takes a float.
+        position_ms = int(voice.position * 1000 // rate)
+        duration_ms = int(voice.clip.frames * 1000 // rate)
         remaining_ms = max(0, duration_ms - position_ms)
         self.track_label.setText(format_clock(position_ms))
         self.remaining_label.setText(format_clock(remaining_ms))
