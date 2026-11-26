@@ -180,7 +180,8 @@ def test_control_pause_and_resume_flip_the_voice(window):
 def test_cue_colour_is_saved(tmp_path):
     from cuerunner.model import Cue, Show
 
-    show = Show(cues=[Cue(number="1", name="x", colour="#2471a3")])
+    show = Show()
+    show.cues.append(Cue(number="1", name="x", colour="#2471a3"))
     path = tmp_path / "c.cuerunner.json"
     show.save(path)
     assert Show.load(path).cues[0].colour == "#2471a3"
