@@ -247,7 +247,7 @@ NAME_COL = 1
 # QLab's list is number, name, target and the three timings. Everything else is detail
 # that now lives in the inspector, so it starts hidden and can be switched back on.
 EXTRA_COLUMNS = ["Fade In", "Fade Out", "Loop", "Progress", "Remaining", "Hotkey"]
-MAX_CHANNELS = 64
+MAX_CHANNELS = 128  # what QLab allows, and what a Dante Virtual Soundcard can present
 
 SHOW_FILTER = "CueRunner show (*.cuerunner.json);;All files (*)"
 AUDIO_FILTER = "Audio files (*.wav *.aiff *.aif *.mp3 *.flac *.ogg);;All files (*)"
@@ -1991,7 +1991,13 @@ class MainWindow(QMainWindow):
         lgrid.addWidget(self.insp_fade_in, 3, 1)
         lgrid.addWidget(QLabel("Fade out:"), 4, 0)
         lgrid.addWidget(self.insp_fade_out, 4, 1)
-        lgrid.addWidget(self.insp_levels, 0, 2, 5, 1)
+        self.insp_levels_scroll = QScrollArea()
+        self.insp_levels_scroll.setWidget(self.insp_levels)
+        self.insp_levels_scroll.setWidgetResizable(True)
+        self.insp_levels_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.insp_levels_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.insp_levels_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        lgrid.addWidget(self.insp_levels_scroll, 0, 2, 5, 1)
         lgrid.addWidget(QLabel("main is the cue's own level; the numbered faders are its outputs."),
                         5, 0, 1, 3)
         lgrid.setColumnStretch(2, 1)
