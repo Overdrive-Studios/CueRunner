@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QScrollArea,
+    QDoubleSpinBox,
     QSpinBox,
     QStackedWidget,
     QTabWidget,
@@ -114,6 +115,7 @@ def settings_from(show: Show) -> dict:
     return {
         "remote_port": show.remote_port,
         "duck_percent": round(show.duck_level * 100),
+        "panic_duration": show.panic_duration,
         "console_host": show.console_host,
         "console_family": show.console_family,
         "spotify_client_id": show.spotify_client_id,
@@ -127,6 +129,7 @@ def apply_settings(show: Show, values: dict) -> None:
     low, high = REMOTE_PORT_RANGE
     show.remote_port = min(high, max(low, int(values["remote_port"])))
     show.duck_level = min(100, max(0, int(values["duck_percent"]))) / 100
+    show.panic_duration = min(60.0, max(0.0, float(values.get("panic_duration", show.panic_duration))))
     show.console_host = str(values["console_host"]).strip()
     show.console_family = values["console_family"]
     show.spotify_client_id = str(values["spotify_client_id"]).strip()
@@ -443,9 +446,17 @@ class SettingsDialog(QDialog):
         self.duck.setRange(0, 100)
         self.duck.setSuffix(" %")
         self.duck.setValue(current["duck_percent"])
+        self.panic_duration = QDoubleSpinBox()
+        self.panic_duration.setRange(0.0, 60.0)
+        self.panic_duration.setDecimals(1)
+        self.panic_duration.setSingleStep(0.5)
+        self.panic_duration.setSuffix(" s")
+        self.panic_duration.setValue(float(current["panic_duration"]))
         general = _page("General", [
             _row("Phone remote port", self.remote_port,
                  "Takes effect the next time the phone remote starts."),
+            _row("Panic duration", self.panic_duration,
+                 "How long Escape takes to fade everything out. Press Escape twice to cut."),
         ])
 
         # Devices
@@ -557,6 +568,7 @@ class SettingsDialog(QDialog):
         return {
             "remote_port": self.remote_port.value(),
             "duck_percent": self.duck.value(),
+            "panic_duration": self.panic_duration.value(),
             "console_host": self.console_host.text(),
             "console_family": self.console_family.currentData(),
             "spotify_client_id": self.spotify_client_id.text(),
