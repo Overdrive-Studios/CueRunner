@@ -16,7 +16,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QEvent, QThread, Qt, QTime, QTimer, Signal
+from PySide6.QtCore import QDate, QEvent, QSettings, QThread, Qt, QTime, QTimer, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QFont, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFrame,
@@ -90,8 +90,10 @@ from cuerunner.version import __version__
 
 BACKUP_INTERVAL_MS = 15 * 60 * 1000  # automatic show snapshot every 15 minutes
 DMX_STEP_MS = 40  # light ramps send a new frame this often
-INSPECTOR_MAX_HEIGHT = 230  # the inspector scrolls past this, so the cue list keeps its room
+INSPECTOR_MAX_HEIGHT = 250  # the inspector scrolls past this, so the cue list keeps its room
 INSPECTOR_TABS = ["Basics", "Triggers", "I/O", "Time & Loops", "Levels", "Objects", "Trim", "Audio FX"]
+# Qt reads a single & as a keyboard shortcut marker, so it is doubled for display only.
+TAB_LABELS = [t.replace("&", "&&") for t in INSPECTOR_TABS]
 MIDI_TRIGGER_KINDS = [("Note On", "note_on"), ("Note Off", "note_off"), ("Control Change", "control_change")]
 SECOND_TRIGGER_ACTIONS = [("does nothing", "nothing"), ("starts it again", "restart"),
                           ("stops it", "stop"), ("pauses it", "pause")]
@@ -131,6 +133,68 @@ def _format_duration(ms: int) -> str:
 
 
 MAIN_QSS = """
+/* The whole window is dark, so nothing falls back to the system's light palette and
+   looks like a different app bolted on. Specific widgets override these below. */
+QWidget { background: #3b3b3f; color: #ececf0; font-size: 13px; }
+QLabel { background: transparent; color: #ececf0; }
+QLabel:disabled, QCheckBox:disabled, QRadioButton:disabled { color: #83838c; }
+QMainWindow, QDialog { background: #343438; }
+QMenuBar { background: #2e2e32; color: #ececf0; }
+QMenuBar::item:selected { background: #3b82d6; }
+QMenu { background: #35353a; color: #ececf0; border: 1px solid #2a2a2e; }
+QMenu::item:selected { background: #3b82d6; }
+QMenu::separator { height: 1px; background: #2a2a2e; margin: 4px 8px; }
+QPushButton {
+    background: #4a4a50; color: #ececf0; border: 1px solid #27272b;
+    border-radius: 4px; padding: 5px 12px;
+}
+QPushButton:hover { background: #55555c; }
+QPushButton:pressed { background: #3f3f45; }
+QPushButton:disabled { background: #3e3e43; color: #83838c; border-color: #333338; }
+QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox, QKeySequenceEdit {
+    background: #2a2a2e; color: #ececf0; border: 1px solid #27272b;
+    border-radius: 3px; padding: 3px 6px; selection-background-color: #3b82d6;
+}
+QLineEdit:disabled, QPlainTextEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled,
+QComboBox:disabled, QKeySequenceEdit:disabled { background: #343438; color: #83838c; }
+QLineEdit:read-only { background: #343438; color: #c8c8d0; }
+QComboBox::drop-down { border: none; width: 18px; }
+QComboBox QAbstractItemView {
+    background: #35353a; color: #ececf0; selection-background-color: #3b82d6;
+    border: 1px solid #27272b;
+}
+QCheckBox, QRadioButton { background: transparent; color: #ececf0; spacing: 6px; }
+QCheckBox::indicator, QRadioButton::indicator { width: 14px; height: 14px; }
+QCheckBox::indicator { border: 1px solid #6a6a74; border-radius: 3px; background: #2a2a2e; }
+QCheckBox::indicator:checked { background: #3b82d6; border-color: #3b82d6; }
+QCheckBox::indicator:disabled { border-color: #4a4a50; background: #343438; }
+QRadioButton::indicator { border: 1px solid #6a6a74; border-radius: 7px; background: #2a2a2e; }
+QRadioButton::indicator:checked { background: #3b82d6; border-color: #3b82d6; }
+QTabBar::tab {
+    background: #3a3a3f; color: #c8c8d0; border: 1px solid #2a2a2e;
+    padding: 5px 14px; margin-right: 1px;
+}
+QTabBar::tab:selected { background: #4e4e56; color: #ffffff; }
+QTabBar::tab:hover { background: #46464d; }
+QListWidget {
+    background: #2a2a2e; color: #ececf0; border: 1px solid #27272b;
+    selection-background-color: #3b82d6;
+}
+QScrollArea, QScrollArea > QWidget > QWidget { background: #3b3b3f; }
+QFrame#inspectorPage, QWidget#inspectorBar { background: #3b3b3f; }
+QScrollBar:vertical { background: #2e2e32; width: 11px; margin: 0; }
+QScrollBar:horizontal { background: #2e2e32; height: 11px; margin: 0; }
+QScrollBar::handle { background: #55555c; border-radius: 5px; min-height: 24px; min-width: 24px; }
+QScrollBar::handle:hover { background: #64646c; }
+QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+QSlider::groove:vertical { background: #2a2a2e; width: 6px; border-radius: 3px; }
+QSlider::handle:vertical {
+    background: #d9d9e0; height: 12px; margin: 0 -5px; border-radius: 3px;
+}
+QProgressBar { background: #2a2a2e; border: 1px solid #27272b; border-radius: 3px; }
+QProgressBar::chunk { background: #3b82d6; }
+QToolTip { background: #26262a; color: #ececf0; border: 1px solid #4a4a50; }
 QWidget#mainWindow { background: #3b3b3f; }
 QPushButton#bigGo {
     background: #c9c3ef; color: #ffffff; border: 1px solid #a9a2db; border-radius: 4px;
@@ -180,6 +244,9 @@ COLUMNS = ["#", "Name", "Pre-Wait", "Length", "Post-Wait", "Fade In", "Fade Out"
 PROGRESS_COL = 9
 REMAINING_COL = 10
 NAME_COL = 1
+# QLab's list is number, name, target and the three timings. Everything else is detail
+# that now lives in the inspector, so it starts hidden and can be switched back on.
+EXTRA_COLUMNS = ["Fade In", "Fade Out", "Loop", "Progress", "Remaining", "Hotkey"]
 MAX_CHANNELS = 64
 
 SHOW_FILTER = "CueRunner show (*.cuerunner.json);;All files (*)"
@@ -842,6 +909,7 @@ class MainWindow(QMainWindow):
         self._alert_timer.timeout.connect(lambda: self.alert_label.setVisible(False))
         self._quitting = False  # guards against the quit being handled twice
         self._build_central()
+        self._load_view_settings()
         self.setAcceptDrops(True)  # drop audio, video or MIDI files onto the window to add cues
         QApplication.instance().installEventFilter(self)  # clicks elsewhere clear the highlight
 
@@ -1068,7 +1136,7 @@ class MainWindow(QMainWindow):
         """
         if not hasattr(self, "insp_wave") or self.insp_wave.is_dragging():
             return
-        if self.insp_tabs.tabText(self.insp_tabs.currentIndex()) != "Time & Loops":
+        if self.insp_tabs.currentIndex() != INSPECTOR_TABS.index("Time & Loops"):
             return
         if cue is None:
             row = self._selected_row()
@@ -1413,6 +1481,18 @@ class MainWindow(QMainWindow):
                                                QKeySequence(QKeySequence.StandardKey.Redo))
         self._refresh_undo_actions()
 
+        view_menu = self.menuBar().addMenu("View")
+        self._column_actions = {}
+        for name in EXTRA_COLUMNS:
+            action = view_menu.addAction(name)
+            action.setCheckable(True)
+            action.toggled.connect(lambda shown, n=name: self._show_column(n, shown))
+            self._column_actions[name] = action
+        view_menu.addSeparator()
+        self.pads_action = view_menu.addAction("Pads and Countdown")
+        self.pads_action.setCheckable(True)
+        self.pads_action.toggled.connect(self._show_bottom_panel)
+
         cues_menu = self.menuBar().addMenu("Cues")
         cues_menu.addAction("Add Audio Cue...", self.add_audio_cue)
         cues_menu.addAction("Add Video Cue...", self.add_video_cue)
@@ -1479,7 +1559,7 @@ class MainWindow(QMainWindow):
     def _build_central(self) -> None:
         container = QWidget(self)
         container.setObjectName("mainWindow")
-        container.setStyleSheet(MAIN_QSS)
+        self.setStyleSheet(MAIN_QSS)
         layout = QVBoxLayout(container)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
@@ -1591,6 +1671,8 @@ class MainWindow(QMainWindow):
         for col, width in [(0, 50), (2, 80), (3, 80), (4, 80), (5, 70), (6, 70), (7, 50), (8, 80),
                            (PROGRESS_COL, 140), (REMAINING_COL, 100), (11, 80)]:
             self.table.setColumnWidth(col, width)
+        for name in EXTRA_COLUMNS:
+            self.table.setColumnHidden(COLUMNS.index(name), True)
         self.table.itemDoubleClicked.connect(lambda item: self.edit_row(item.row()))
         self.table.itemSelectionChanged.connect(self._remember_selected_row)
         self.table.itemSelectionChanged.connect(self._refresh_now_label)
@@ -1609,7 +1691,7 @@ class MainWindow(QMainWindow):
         self.insp_tabs = QTabBar()
         self.insp_tabs.setObjectName("inspectorTabs")
         self.insp_tabs.setExpanding(False)
-        for title in INSPECTOR_TABS:
+        for title in TAB_LABELS:
             self.insp_tabs.addTab(title)
         self.insp_tabs.setCurrentIndex(0)
         outer.addWidget(self.insp_tabs)
@@ -1619,7 +1701,7 @@ class MainWindow(QMainWindow):
         grid = QGridLayout(page)
         grid.setContentsMargins(12, 10, 12, 10)
         grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(8)
+        grid.setVerticalSpacing(5)
 
         self.insp_number = QLineEdit()
         self.insp_number.setReadOnly(True)
@@ -1641,7 +1723,8 @@ class MainWindow(QMainWindow):
         self.insp_target = QLineEdit()
         self.insp_target.setReadOnly(True)
         self.insp_notes = QPlainTextEdit()
-        self.insp_notes.setMinimumHeight(52)
+        self.insp_notes.setMinimumHeight(44)
+        self.insp_notes.setMaximumHeight(64)  # it asks for far more room than it needs
         self.insp_colour = QComboBox()
         for label, value in COLOURS:
             self.insp_colour.addItem(label, value)
@@ -1665,10 +1748,12 @@ class MainWindow(QMainWindow):
         grid.addWidget(QLabel("Notes:"), len(right), 2, Qt.AlignmentFlag.AlignTop)
         grid.addWidget(self.insp_notes, len(right), 3)
         flags = QHBoxLayout()
+        flags.setSpacing(18)  # room between the tick boxes so they do not run together
         for box in (self.insp_armed, self.insp_flagged, self.insp_auto_load, self.insp_skip):
             flags.addWidget(box)
         flags.addStretch(1)
         grid.addLayout(flags, len(left), 0, 1, 3)
+        grid.setRowStretch(len(left) + 1, 1)
         grid.addWidget(self.insp_full_edit, len(left), 3, Qt.AlignmentFlag.AlignRight)
         grid.setColumnStretch(3, 1)
         # One page per tab, in tab order, so the stack index matches the tab index.
@@ -2050,7 +2135,9 @@ class MainWindow(QMainWindow):
         self.insp_full_edit.clicked.connect(self.edit_selected)
         layout.addWidget(self.inspector_bar)
 
-        bottom = QHBoxLayout()
+        self.bottom_panel = QWidget()
+        bottom = QHBoxLayout(self.bottom_panel)
+        bottom.setContentsMargins(0, 0, 0, 0)
         self.countdown = Countdown(self)
         self.soundboard = Soundboard(self)
         self.soundboard.padPressed.connect(self._on_pad_pressed)
@@ -2059,7 +2146,7 @@ class MainWindow(QMainWindow):
         self.soundboard.padRouting.connect(self._pad_routing)
         bottom.addWidget(self.countdown, 1)
         bottom.addWidget(self.soundboard, 3)
-        layout.addLayout(bottom)
+        layout.addWidget(self.bottom_panel)
 
         # Footer: Edit or Show mode, the cue count, and settings.
         footer = QHBoxLayout()
@@ -2300,6 +2387,32 @@ class MainWindow(QMainWindow):
         self.redo_action.setEnabled(bool(self._redo))
         self.undo_action.setText(f"Undo {self._undo[-1][0]}" if self._undo else "Undo")
         self.redo_action.setText(f"Redo {self._redo[-1][0]}" if self._redo else "Redo")
+
+    def _show_column(self, name: str, shown: bool) -> None:
+        self.table.setColumnHidden(COLUMNS.index(name), not shown)
+        self._save_view_settings()
+
+    def _show_bottom_panel(self, shown: bool) -> None:
+        self.bottom_panel.setVisible(shown)
+        self._save_view_settings()
+
+    def _save_view_settings(self) -> None:
+        settings = QSettings("Overdrive Studios", "CueRunner")
+        settings.setValue("view/columns",
+                          [n for n, a in self._column_actions.items() if a.isChecked()])
+        settings.setValue("view/pads", self.pads_action.isChecked())
+
+    def _load_view_settings(self) -> None:
+        """Bring back whichever columns and panels were last switched on."""
+        settings = QSettings("Overdrive Studios", "CueRunner")
+        wanted = settings.value("view/columns", []) or []
+        if isinstance(wanted, str):
+            wanted = [wanted]
+        for name, action in self._column_actions.items():
+            action.setChecked(name in wanted)
+        pads = settings.value("view/pads", False)
+        self.pads_action.setChecked(pads in (True, "true", "True", 1, "1"))
+        self.bottom_panel.setVisible(self.pads_action.isChecked())
 
     def _cue_problem(self, title: str, detail: str = "", modal_when_editing: bool = True) -> None:
         """A cue could not run.
@@ -3824,6 +3937,7 @@ class _DownloadDialog(QDialog):
 
 def run() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
+    app.setStyleSheet(MAIN_QSS)  # dialogs and menus match the window
     apply_dark_theme(app)
     window = MainWindow()
     start = launcher.LaunchDialog(
