@@ -144,3 +144,64 @@ def test_the_panic_duration_is_saved_with_the_show(tmp_path):
     path = tmp_path / "show.json"
     show.save(path)
     assert Show.load(path).panic_duration == 2.5
+
+
+# --- the panic path must not be breakable -----------------------------
+def test_escape_clears_the_screen_even_if_something_else_throws(window):
+    """Everything in hard_stop stands alone, and the displays go first."""
+    from unittest import mock as _mock
+
+    order = []
+    window._video = _mock.Mock()
+    window._video.stop_all.side_effect = lambda: order.append("video")
+    with _mock.patch.object(type(window), "_pause_spotify",
+                            side_effect=RuntimeError("spotify is unwell")), \
+         _mock.patch.object(type(window), "_stop_timecode",
+                            side_effect=RuntimeError("timecode is unwell")):
+        window.hard_stop()
+    assert order == ["video"]
+    assert window._playing_cue is None
+    assert window._panicking is False
+    assert window._timers == []
+
+
+def test_the_displays_are_cleared_before_anything_that_might_fail(window):
+    from unittest import mock as _mock
+
+    order = []
+    window._video = _mock.Mock()
+    window._video.stop_all.side_effect = lambda: order.append("video")
+    with _mock.patch.object(type(window), "_pause_spotify",
+                            side_effect=lambda self=None: order.append("spotify")):
+        window.hard_stop()
+    assert order[0] == "video"
+
+
+def test_escape_fades_the_picture_as_well_as_the_sound(window):
+    from unittest import mock as _mock
+
+    window._video = _mock.Mock()
+    window.show_model.panic_duration = 1.0
+    window.panic()
+    window._video.fade_out.assert_called_once_with(1.0)
+
+
+def test_a_video_fade_that_fails_clears_the_screen_outright(window):
+    from unittest import mock as _mock
+
+    window._video = _mock.Mock()
+    window._video.fade_out.side_effect = RuntimeError("no fading today")
+    window.show_model.panic_duration = 1.0
+    window.panic()
+    assert window._video.stop_all.called
+
+
+def test_a_mixer_that_throws_does_not_stop_the_picture_being_cleared(window):
+    from unittest import mock as _mock
+
+    window._video = _mock.Mock()
+    window.mixer = _mock.Mock()
+    window.mixer.voices.side_effect = RuntimeError("the mixer is unwell")
+    window.show_model.panic_duration = 1.0
+    window.panic()
+    assert window._video.fade_out.called

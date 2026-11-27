@@ -3968,8 +3968,17 @@ class MainWindow(QMainWindow):
             self.hard_stop()
             return
         self._panicking = True
-        for voice in self.mixer.voices():
-            self.mixer.fade_out(voice, seconds)
+        # Each of these stands alone. Escape is the emergency stop, so one subsystem
+        # failing must never leave the rest of the show running or a window on the screen.
+        try:
+            for voice in self.mixer.voices():
+                self.mixer.fade_out(voice, seconds)
+        except Exception:
+            pass
+        try:
+            self._video.fade_out(seconds)  # the picture fades with the sound
+        except Exception:
+            self._video.stop_all()
         QTimer.singleShot(int(seconds * 1000) + 50, self._finish_panic)
 
     def _panic_pressed(self) -> None:
@@ -3987,18 +3996,29 @@ class MainWindow(QMainWindow):
             self.hard_stop()
 
     def hard_stop(self) -> None:
-        """Stop everything immediately, with no fade, including pads."""
-        self._pause_spotify()
-        self._video.stop_all()
-        if self.mixer is not None:
-            self.mixer.clear()
-            self.mixer.paused = False
-        self._cue_voices = []
-        self._stop_timecode()
-        self._stop_midifile()
-        for timer in self._timers:
-            timer.stop()
-        self._timers = []
+        """Stop everything immediately, with no fade, including pads.
+
+        The displays are cleared first, and every step is taken on its own. This is what
+        Escape ends up calling, so nothing here may be left undone because something
+        earlier in the list threw.
+        """
+        def clear_audio() -> None:
+            if self.mixer is not None:
+                self.mixer.clear()
+                self.mixer.paused = False
+            self._cue_voices = []
+
+        def stop_timers() -> None:
+            for timer in self._timers:
+                timer.stop()
+            self._timers = []
+
+        for step in (self._video.stop_all, clear_audio, self._pause_spotify,
+                     self._stop_timecode, self._stop_midifile, stop_timers):
+            try:
+                step()
+            except Exception:
+                pass
         self._playing_cue = None
         self._panicking = False
         self._radio = None

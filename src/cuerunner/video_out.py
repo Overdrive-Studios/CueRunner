@@ -163,6 +163,8 @@ class _Output:
     def hide_text(self) -> None:
         if self.text_window is not None:
             self.text_window.hide()
+            if self.text_window.isVisible():
+                self.text_window.close()
 
     def show_on_screen(self, fit: str) -> None:
         self.widget.setAspectRatioMode(
@@ -182,12 +184,35 @@ class _Output:
         self.showing = who
 
     def blank(self) -> None:
-        """Take everything off the display and let the desktop back."""
-        self.player.stop()
-        self.stop_camera()
-        self.hide_text()
-        self.widget.hide()
+        """Take everything off the display and let the desktop back.
+
+        The windows go first and the players afterwards. This is the panic path, so
+        nothing that might fail is allowed to stand between pressing Escape and the screen
+        being clear, and every step is on its own: one that fails cannot stop the others.
+        """
         self.showing = ""
+        for step in (self._hide_window, self.hide_text, self.player.stop, self.stop_camera):
+            try:
+                step()
+            except Exception:
+                pass
+
+    def _hide_window(self) -> None:
+        """Get the output window off the screen and keep it off.
+
+        hide() alone has been known to leave a black window behind on a Mac, so this works
+        its way up: hide, then close, then tear the native window down altogether. A window
+        that no longer exists cannot be on screen. Each is built again by the next cue.
+        """
+        for widget in (self.widget, self.text_window):
+            if widget is None:
+                continue
+            widget.setWindowOpacity(1.0)  # back to solid, ready for the next cue
+            widget.hide()
+            if widget.isVisible():
+                widget.close()
+            if widget.isVisible():
+                widget.destroy()
 
     def _check_end(self, position_ms: int) -> None:
         """Stop at the cue's end time, which the media player knows nothing about.
@@ -208,6 +233,13 @@ class _Output:
         if self.camera is not None:
             self.camera.stop()
             self.session.setCamera(None)
+
+
+def _dim(out: "_Output", level: float) -> None:
+    try:
+        out.widget.setWindowOpacity(max(0.0, min(1.0, level)))
+    except Exception:
+        pass
 
 
 class VideoOutputs(QObject):
@@ -290,9 +322,28 @@ class VideoOutputs(QObject):
         out.show_text(text, size)
 
     def stop_all(self) -> None:
-        """Clear every display. Nothing is left covering the screen."""
-        for out in self._outputs.values():
-            out.blank()
+        """Clear every display. Nothing is left covering the screen, whatever else fails."""
+        for out in list(self._outputs.values()):
+            try:
+                out.blank()
+            except Exception:
+                pass
+
+    def fade_out(self, seconds: float) -> None:
+        """Fade every display down over this long, then clear it, as QLab's panic does.
+
+        Escape used to leave the picture up at full until the audio fade had finished,
+        which looked like nothing had happened.
+        """
+        steps = max(1, min(30, int(seconds * 30)))
+        for out in list(self._outputs.values()):
+            if not out.widget.isVisible():
+                continue
+            for step in range(1, steps + 1):
+                level = 1.0 - step / steps
+                QTimer.singleShot(int(seconds * 1000 * step / steps),
+                                  lambda o=out, lv=level: _dim(o, lv))
+        QTimer.singleShot(int(seconds * 1000) + 30, self.stop_all)
 
     def close(self) -> None:
         for out in self._outputs.values():

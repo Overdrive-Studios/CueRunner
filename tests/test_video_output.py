@@ -192,3 +192,80 @@ def test_closing_the_show_closes_the_output_windows(app):
     assert out.widget.close.called
     assert out.text_window.close.called
     assert outputs._outputs == {}
+
+
+# --- Escape has to clear the screen, whatever else goes wrong ----------
+def test_hiding_works_its_way_up_until_the_window_is_gone(app):
+    out = bare_output()
+    out.widget.isVisible.return_value = True  # a window that refuses to go quietly
+    out.text_window = None
+    video_out._Output._hide_window(out)
+    assert out.widget.hide.called
+    assert out.widget.close.called
+    assert out.widget.destroy.called
+
+
+def test_a_window_that_hides_is_left_alone(app):
+    out = bare_output()
+    out.widget.isVisible.return_value = False
+    out.text_window = None
+    video_out._Output._hide_window(out)
+    assert out.widget.hide.called
+    assert not out.widget.close.called
+    assert not out.widget.destroy.called
+
+
+def test_the_window_goes_before_the_player_is_stopped(app):
+    """Nothing that might fail may stand between Escape and a clear screen."""
+    out = bare_output()
+    order = []
+    out.widget.hide.side_effect = lambda: order.append("hide")
+    out.player.stop.side_effect = lambda: order.append("stop")
+    out.widget.isVisible.return_value = False
+    video_out._Output.blank(out)
+    assert order.index("hide") < order.index("stop")
+
+
+def test_one_step_failing_does_not_stop_the_rest(app):
+    out = bare_output()
+    out.widget.isVisible.return_value = False
+    out.player.stop.side_effect = RuntimeError("the media engine is unwell")
+    out.text_window = mock.Mock()
+    out.text_window.isVisible.return_value = False
+    video_out._Output.blank(out)  # must not raise
+    assert out.widget.hide.called
+    assert out.showing == ""
+
+
+def test_one_display_failing_does_not_leave_the_others_up(app):
+    outputs = video_out.VideoOutputs()
+    broken, fine = bare_output(), bare_output()
+    broken.widget.hide.side_effect = RuntimeError("stuck")
+    broken.widget.isVisible.return_value = False
+    fine.widget.isVisible.return_value = False
+    outputs._outputs = {0: broken, 1: fine}
+    outputs.stop_all()
+    assert fine.widget.hide.called
+
+
+def test_panic_fades_the_picture_down_and_then_clears_it(app):
+    outputs = video_out.VideoOutputs()
+    out = bare_output()
+    out.widget.isVisible.return_value = True
+    outputs._outputs = {0: out}
+    with mock.patch.object(video_out.QTimer, "singleShot") as later:
+        outputs.fade_out(1.0)
+    delays = [call.args[0] for call in later.call_args_list]
+    assert len(delays) > 2  # a run of steps, not one jump
+    assert max(delays) >= 1000  # and a final clear once the fade is done
+    assert later.call_args_list[-1].args[1] == outputs.stop_all
+
+
+def test_a_display_that_is_not_showing_anything_is_not_faded(app):
+    outputs = video_out.VideoOutputs()
+    out = bare_output()
+    out.widget.isVisible.return_value = False
+    outputs._outputs = {0: out}
+    with mock.patch.object(video_out.QTimer, "singleShot") as later:
+        outputs.fade_out(1.0)
+    assert len(later.call_args_list) == 1  # just the clear at the end
